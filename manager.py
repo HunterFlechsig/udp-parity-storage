@@ -1,3 +1,8 @@
+# manager.py
+# Hunter Flechsig, 1225292005
+# Create a manager process
+# Manager process is responsible for orchestrating the user and disk processes and the dss
+
 import socket;
 import json;
 import select;
@@ -5,13 +10,16 @@ import select;
 HOST = '127.0.0.1';
 PORT = 65432;
 
+# data-structures to store the user, disk, and dss information
 user_data = {};
 disk_data = {};
 dss_data = {};
 
 free_disks = set();
 used_ports = set();
+#-------------------------------------------------------------
 
+#----------------------- Helpers -----------------------#
 # Check if a user exists
 def user_exists(addr):
     for user in user_data:
@@ -19,6 +27,42 @@ def user_exists(addr):
             return True;
     return False;
 
+# helpers to ensure data-structures consistency when adding and removing users and disks
+def add_user(user):
+    user_data[user['user-name']] = user;
+    used_ports.add(user['m-port']);
+    used_ports.add(user['c-port']);
+
+def add_disk(disk):
+    disk_data[disk['disk-name']] = disk;
+    free_disks.add(disk['disk-name']);
+    used_ports.add(disk['m-port']);
+    used_ports.add(disk['c-port']);
+
+def remove_user(user):
+    used_ports.remove(user['m-port']);
+    used_ports.remove(user['c-port']);
+    user_data.pop(user['user-name']);
+
+
+def remove_disk(disk):
+    free_disks.remove(disk['disk-name']);
+    used_ports.remove(disk['m-port']);
+    used_ports.remove(disk['c-port']);
+    disk_data.pop(disk['disk-name']);
+
+# Helper to send a response to the user or disk process
+def response(success, message, addr):
+    data = {
+        "status": "success" if success else "failure",
+        "message": message
+    }
+
+    s.sendto(json.dumps(data).encode(), addr);
+    return data;
+#-----------------------------------------------------------------------------------
+
+#----------------------- Commands to handle messages from user and disk processes -----------------------#
 # Register a user process
 def register_user(message):
     # Check if all required fields exist
@@ -33,15 +77,14 @@ def register_user(message):
         print(f"❌ User already exists: {message['data']['user-name']}");
         return (False, "User already exists: " + message['data']['user-name']);
     
+    # Check if the port is already in use
     if message['data']['m-port'] in used_ports or message['data']['c-port'] in used_ports:
             print(f"❌ Port already in use on this IP: {message['data']['Ipv4']} with port {message['data']['m-port']} or {message['data']['c-port']}");
             return (False, "Port already in use on this IP: " + message['data']['Ipv4'] + " with port " + message['data']['m-port'] + " or " + message['data']['c-port']);
-    ############################################################
+    #----------------------------------------------------------
 
     # Register the user
-    user_data[message['data']['user-name']] = message['data'];
-    used_ports.add(message['data']['m-port']);
-    used_ports.add(message['data']['c-port']);
+    add_user(**message['data']);
     print(f"✅ Registered user: {message['data']['user-name']} \n");
     return (True, "Registered user: " + message['data']['user-name']);
 
@@ -59,21 +102,20 @@ def register_disk(message):
         print(f"❌ Disk already exists: {message['data']['disk-name']}");
         return (False, "Disk already exists: " + message['data']['disk-name']);
     
+    # Check if the port is already in use
     if message['data']['m-port'] in used_ports or message['data']['c-port'] in used_ports:
         print(f"❌ Port already in use on this IP: {message['data']['Ipv4']} with port {message['data']['m-port']} or {message['data']['c-port']}");
         return (False, "Port already in use on this IP: " + message['data']['Ipv4'] + " with port " + message['data']['m-port'] + " or " + message['data']['c-port']);
-    ############################################################
+    #----------------------------------------------------------
 
     # Register the disk
-    disk_data[message['data']['disk-name']] = {**message['data'], "free": False};
-    free_disks.add(message['data']['disk-name']);
-    used_ports.add(message['data']['m-port']);
-    used_ports.add(message['data']['c-port']);
+    add_disk({**message['data'], "inDSS": False});
     print(f"✅ Registered disk: {message['data']['disk-name']} \n");
     return (True, " Registered disk: " + message['data']['disk-name']);
 
 # Configure a dss
 def configure_dss(message, addr):
+    # Check if the user configuring the dss exists
     if not user_exists(addr):
         print(f"❌ User not found: {addr}");
         return (False, f" User not found: {addr[0]}:{addr[1]}");
@@ -115,47 +157,107 @@ def configure_dss(message, addr):
     }
     # Pop n disks from the free disks
     for _ in range(n):
-        dss_data[message['data']['dss-name']]['disks'].append(free_disks.pop());
+        disk_info = disk_data[free_disks.pop()];
+        disk_info['inDSS'] = True;
+        disk_data[disk_info['disk-name']] = disk_info;
+        dss_data[message['data']['dss-name']]['disks'].append(disk_info['disk-name']);
 
     print(f"✅ Configured DSS: {message['data']['dss-name']} \n");
     return (True, "Configured DSS: " + message['data']['dss-name']);
 
+# Unregister a disk
+def deregister_disk(message, addr):
+    # Check if all required fields exist
+    required_fields = ['disk-name'];
+    for field in required_fields:
+        if field not in message['data']:
+            print(f"❌ Missing field: {field}");
+            return (False, "Missing field: " + field);
+
+    disk_name = message['data']['disk-name']
     
-def response(success, message, addr):
-    data = {
-        "status": "success" if success else "failure",
-        "message": message
-    }
+    # Check if the disk exists
+    if disk_name not in disk_data:
+        print(f"❌ Disk not found: {disk_name}");
+        return (False, "Disk not found: " + disk_name);
+    
+    # Check if the disk is in free disks
+    if not disk_name in free_disks:
+        print(f"❌ Disk not in free disks: {disk_name}");
+        return (False, "Disk not in free disks: " + disk_name);
+    
+    # check if come from the same IP and m-port as the registered disk
+    disk_info = disk_data[disk_name]
+    if disk_info['Ipv4'] != addr[0] or disk_info['m-port'] != addr[1]:
+        print(f"❌ Deregister attempt from wrong address: got {addr[0]}:{addr[1]}, expected {disk_info['Ipv4']}:{disk_info['m-port']}")
+        return (False, f"Deregister request must come from registered IP and m-port ({disk_info['Ipv4']}:{disk_info['m-port']})")
+    #----------------------------------------------------------
 
-    s.sendto(json.dumps(data).encode(), addr);
-    return data;
+    # deregister the disk
+    remove_disk(disk_info);
+    print(f"✅ Deregistered disk: {disk_name} \n");
+    return (True, "Deregistered disk: " + disk_name);
 
+# Deregister a user
+def deregister_user(message, addr):
+    # Check if all required fields exist
+    required_fields = ['user-name'];
+    for field in required_fields:
+        if field not in message['data']:
+            print(f"❌ Missing field: {field}");
+            return (False, "Missing field: " + field);
+    
+    # Check if the user exists
+    if message['data']['user-name'] not in user_data:
+        print(f"❌ User not found: {message['data']['user-name']}");
+        return (False, "User not found: " + message['data']['user-name']);
+    
 
+    # Ensure the deregister request is coming from the same IP and m-port as the registered user
+    user_name = message['data']['user-name']
+    user_info = user_data[user_name]
+    if user_info['Ipv4'] != addr[0] or user_info['m-port'] != addr[1]:
+        print(f"❌ Deregister attempt from wrong address: got {addr[0]}:{addr[1]}, expected {user_info['Ipv4']}:{user_info['m-port']}")
+        return (False, f"Deregister request must come from registered IP and m-port ({user_info['Ipv4']}:{user_info['m-port']})")
+    ############################################################
 
+    # Deregister the user
+    remove_user(user_info);
+    print(f"✅ Deregistered user: {user_name} \n");
+    return (True, "Deregistered user: " + message['data']['user-name']);
+
+#-----------------------------------------------------------------------------------
+    
 #create a socket object
 # AF_INET is the address family for IPv4
 # SOCK_DGRAM is the socket type for UDP
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+    # Bind the socket to the IP and port provided
     s.bind((HOST, PORT));
-    print(f"UDP Server listening on {HOST}:{PORT}");
+    print(f"UDP Server listening on {HOST}:{PORT} \n");
     
+    # start listening for messages from the user and disk processes
     while True:
         try:
-            #receive data from the client
             data = None;
+            # Check if there is data to receive
             r, _, _ = select.select([s], [], [], 1.0)
             if r:
                 data, addr = s.recvfrom(1024, )
-
+                
+            # If there is no data, continue
             if not data:
                 continue;
-
+            
+            # If there is data, decode it and parse it as a json object
             message = json.loads(data.decode());
 
+            # Check if the message has a type field
             if('type' not in message):
                 response(False, "Invalid message: Missing type field", addr);
                 continue;
 
+            # Handle the message based on the type
             match message['type']:
                 case "register-user":
                     res = register_user(message);
@@ -165,6 +267,12 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                     response(res[0], res[1], addr);
                 case "configure-dss":
                     res = configure_dss(message, addr);
+                    response(res[0], res[1], addr);
+                case "deregister-disk":
+                    res = deregister_disk(message, addr);
+                    response(res[0], res[1], addr);
+                case "deregister-user":
+                    res = deregister_user(message, addr);
                     response(res[0], res[1], addr);
                 case _:
                     print(f"Invalid message type: {message['type']}");

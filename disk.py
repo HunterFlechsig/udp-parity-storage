@@ -1,3 +1,8 @@
+# disk.py
+# Hunter Flechsig, 1225292005
+# Create a disk process
+# Disk process is responsible for the storage of data
+
 import socket;
 import json;
 import getopt, sys
@@ -58,6 +63,20 @@ if name is None or ip is None or m_port is None or c_port is None:
     sys.exit(1)
 #--------------------------------------------------------#
 
+def send_deregister_disk():
+    message = {
+        "type": "deregister-disk",
+        "data": {
+            "disk-name": name
+        }
+    }
+    s.sendto(json.dumps(message).encode(), ("127.0.0.1", 65432));
+    response = json.loads(s.recvfrom(1024)[0].decode());
+    if response['status'] == 'success':
+        print(f"✅ Disk {name} deregistered successfully \n");
+        sys.exit(0);
+    if response['status'] == 'failure':
+        print(f"❌ Error: {response['message']} \n try again...\n");
 
 # AF_INET is the address family for IPv4
 # SOCK_DGRAM is the socket type for UDP
@@ -85,9 +104,19 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         print(f"✅ Disk {name} registered successfully \n");
 
     while True:
-
         try:
-            time.sleep(1);
+            print ("Commands: \n"
+                "1. deregister-disk and exit \n"
+                "2. exit \n"
+            )
+            command = input("Enter command: ");
+            match command:
+                case "1":
+                    send_deregister_disk()
+                case "2":
+                    sys.exit(0)
+                case _:
+                    print("Invalid command \n");
         except KeyboardInterrupt:
             print("\nCtrl+C pressed, shutting down...")
             break;

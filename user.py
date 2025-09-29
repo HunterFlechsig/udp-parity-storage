@@ -8,11 +8,12 @@ import json;
 import getopt, sys
 
 name = None
-ip = None
+ip = "127.0.0.1"
 m_port = None
 c_port = None
+ports = [31500, 31999]
 manager_ip = "127.0.0.1"
-manager_port = 65432
+manager_port = ports[0]
 manager_address = (manager_ip, manager_port)
 
 #--------------- Get arguments ---------------#
@@ -26,7 +27,7 @@ try:
         if currentArg in ("-h", "--help"):
             print("Showing Help \n" 
                 " -n, --name: Name of the user \n"
-                " -i, --ip: IP address of the user \n"
+                " -i, --ip: IP address of the user (default: 127.0.0.1) \n"
                 " -m, --m-port: M port of the user \n"
                 " -c, --c-port: C port of the user \n"
             )
@@ -61,6 +62,15 @@ if name is None or ip is None or m_port is None or c_port is None:
     if c_port is None:
         print("  - Missing c-port (-c or --c-port)")
     print("Use -h or --help for usage information\n")
+    sys.exit(1)
+
+# Validate port ranges
+if not (ports[0] <= m_port <= ports[1]):
+    print(f"❌ Error: m-port {m_port} must be in range {ports[0]}-{ports[1]}")
+    sys.exit(1)
+
+if not (ports[0] <= c_port <= ports[1]):
+    print(f"❌ Error: c-port {c_port} must be in range {ports[0]}-{ports[1]}")
     sys.exit(1)
 #--------------------------------------------------------#
 

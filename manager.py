@@ -6,9 +6,43 @@
 import socket;
 import json;
 import select;
+import getopt;
+import sys;
 
+# Default configuration
 HOST = '127.0.0.1';
-PORT = 65432;
+PORT = 31500;
+
+# Command line argument parsing
+args = sys.argv[1:]
+options = "hi:p:h"
+long_options = ["ip", "port", "help"]
+
+try:
+    arguments, values = getopt.getopt(args, options, long_options)
+    for currentArg, currentVal in arguments:
+        if currentArg in ("-h", "--help"):
+            print("Manager Process Help \n" 
+                " -i, --ip: IP address to bind the manager to (default: 127.0.0.1) \n"
+                " -p, --port: Port number to bind the manager to (default: 31500) \n"
+            )
+            sys.exit(0)
+        elif currentArg in ("-i", "--ip"):
+            HOST = currentVal
+        elif currentArg in ("-p", "--port"):
+            try:
+                PORT = int(currentVal)
+            except ValueError:
+                print("❌ Error: Invalid port (-p or --port) value")
+                sys.exit(1)
+except getopt.error as err:
+    print(str(err))
+    sys.exit(1)
+
+# Validate port range
+if not (31500 <= PORT <= 31999):
+    print(f"❌ Error: Port {PORT} must be in range 31500-31999")
+    sys.exit(1)
 
 # data-structures to store the user, disk, and dss information
 user_data = {};
@@ -80,11 +114,11 @@ def register_user(message):
     # Check if the port is already in use
     if message['data']['m-port'] in used_ports or message['data']['c-port'] in used_ports:
             print(f"❌ Port already in use on this IP: {message['data']['Ipv4']} with port {message['data']['m-port']} or {message['data']['c-port']}");
-            return (False, "Port already in use on this IP: " + message['data']['Ipv4'] + " with port " + message['data']['m-port'] + " or " + message['data']['c-port']);
+            return (False, "Port already in use on this IP: " + message['data']['Ipv4'] + " with port " + str(message['data']['m-port']) + " or " + str(message['data']['c-port']));
     #----------------------------------------------------------
 
     # Register the user
-    add_user(**message['data']);
+    add_user(message['data']);
     print(f"✅ Registered user: {message['data']['user-name']} \n");
     return (True, "Registered user: " + message['data']['user-name']);
 
@@ -105,7 +139,7 @@ def register_disk(message):
     # Check if the port is already in use
     if message['data']['m-port'] in used_ports or message['data']['c-port'] in used_ports:
         print(f"❌ Port already in use on this IP: {message['data']['Ipv4']} with port {message['data']['m-port']} or {message['data']['c-port']}");
-        return (False, "Port already in use on this IP: " + message['data']['Ipv4'] + " with port " + message['data']['m-port'] + " or " + message['data']['c-port']);
+        return (False, "Port already in use on this IP: " + message['data']['Ipv4'] + " with port " + str(message['data']['m-port']) + " or " + str(message['data']['c-port']));
     #----------------------------------------------------------
 
     # Register the disk
@@ -135,10 +169,15 @@ def configure_dss(message, addr):
 
     # Check if the n is a number and a valid number
     n = message['data']['n']
-    if not n.isdigit() or int(n) < 3 or int(n) > len(free_disks):
+    if not n.isdigit() or int(n) < 3:
         print(f"❌ Invalid n: {n}");
-        return (False, "Invalid n: " + n + f" (must be greater than 2 and less than {len(free_disks)} and a number)");
+        return (False, f"Invalid n: {n} (must be greater than 2 and a number)");
+
     n = int(n)
+    if n > len(free_disks):
+        print(f"❌ Invalid n: {n} (Not enough free disks to configure the dss. Only {len(free_disks)} free disks available)");
+        return (False, f"Invalid n: {n} (Not enough free disks to configure the dss. Only {len(free_disks)} free disks available)");
+
 
     # Check if the striping-unit is a valid number
     striping_unit = message['data']['striping-unit']

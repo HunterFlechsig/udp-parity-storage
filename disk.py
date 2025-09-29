@@ -6,13 +6,16 @@
 import socket;
 import json;
 import getopt, sys
-import time
 
 name = None
-ip = None
+ip = "127.0.0.1"
 m_port = None
 c_port = None
 
+ports = [31500, 31999]
+manager_ip = "127.0.0.1"
+manager_port = ports[0]
+manager_address = (manager_ip, manager_port)
 
 #--------------- Get arguments ---------------#
 args = sys.argv[1:]
@@ -25,7 +28,7 @@ try:
         if currentArg in ("-h", "--help"):
             print("Showing Help \n" 
                 " -n, --name: Name of the disk \n"
-                " -i, --ip: IP address of the disk \n"
+                " -i, --ip: IP address of the disk (default: 127.0.0.1) \n"
                 " -m, --m-port: M port of the disk \n"
                 " -c, --c-port: C port of the disk \n"
             )
@@ -61,8 +64,19 @@ if name is None or ip is None or m_port is None or c_port is None:
         print("  - Missing c-port (-c or --c-port)")
     print("Use -h or --help for usage information\n")
     sys.exit(1)
+
+# Validate port ranges
+if not (ports[0] <= m_port <= ports[1]):
+    print(f"❌ Error: m-port {m_port} must be in range {ports[0]}-{ports[1]}")
+    sys.exit(1)
+
+if not (ports[0] <= c_port <= ports[1]):
+    print(f"❌ Error: c-port {c_port} must be in range {ports[0]}-{ports[1]}")
+    sys.exit(1)
 #--------------------------------------------------------#
 
+#---------------------- Commands to send messages to the manager ---------------------------------------
+# Send a deregister-disk message to the manager
 def send_deregister_disk():
     message = {
         "type": "deregister-disk",
@@ -78,12 +92,8 @@ def send_deregister_disk():
     if response['status'] == 'failure':
         print(f"❌ Error: {response['message']} \n try again...\n");
 
-# AF_INET is the address family for IPv4
-# SOCK_DGRAM is the socket type for UDP
-with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-    s.bind((ip, m_port));
-    print(f"Disk {name} started on {ip}:{m_port} \n");
-
+# Send a register-disk message to the manager
+def send_register_disk():
     message = {
         "type": "register-disk",
         "data": {
@@ -93,7 +103,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             "c-port": int(c_port)
         }
     }
-    s.sendto(json.dumps(message).encode(), ("127.0.0.1", 65432));
+    s.sendto(json.dumps(message).encode(), manager_address);
     response = json.loads(s.recvfrom(1024)[0].decode());
 
     if response['status'] == 'failure':
@@ -102,7 +112,18 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
 
     if response['status'] == 'success':
         print(f"✅ Disk {name} registered successfully \n");
+#-----------------------------------------------------------------------------------
 
+
+# AF_INET is the address family for IPv4
+# SOCK_DGRAM is the socket type for UDP
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+    s.bind((ip, m_port));
+    print(f"Disk {name} started on {ip}:{m_port} \n");
+
+    send_register_disk()
+
+    # start commands loop
     while True:
         try:
             print ("Commands: \n"
@@ -117,6 +138,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                     sys.exit(0)
                 case _:
                     print("Invalid command \n");
+
         except KeyboardInterrupt:
             print("\nCtrl+C pressed, shutting down...")
             break;

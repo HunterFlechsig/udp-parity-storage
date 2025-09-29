@@ -103,8 +103,10 @@ def send_deregister_disk():
             "disk-name": name
         }
     }
+    print(f"Sending deregister-disk message to {manager_address} with data {message} ");
     s.sendto(json.dumps(message).encode(), manager_address);
     response = json.loads(s.recvfrom(1024)[0].decode());
+    print(f"Received response from {manager_address} with data {response} ");
     if response['status'] == 'success':
         print(f"✅ Disk {name} deregistered successfully \n");
         sys.exit(0);
@@ -122,9 +124,10 @@ def send_register_disk():
             "c-port": int(c_port)
         }
     }
+    print(f"Sending register-disk message to {manager_address} with data {message} ");
     s.sendto(json.dumps(message).encode(), manager_address);
     response = json.loads(s.recvfrom(1024)[0].decode());
-
+    print(f"Received response from {manager_address} with data {response} ");
     if response['status'] == 'failure':
         print(f"❌ Error: {response['message']} \n");
         sys.exit(1)

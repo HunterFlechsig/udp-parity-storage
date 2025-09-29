@@ -91,7 +91,8 @@ def response(success, message, addr):
         "status": "success" if success else "failure",
         "message": message
     }
-    print(f"Sending response to {addr[0]}:{addr[1]} with data {data}");
+    print(f"Sending response to {addr[0]}:{addr[1]}")
+    print(f"   Response data: {json.dumps(data, indent=2)}")
     s.sendto(json.dumps(data).encode(), addr);
     return data;
 #-----------------------------------------------------------------------------------
@@ -118,9 +119,8 @@ def register_user(message):
     #----------------------------------------------------------
 
     # Register the user
-    print(f"Registering user: {message['data']['user-name']} with data {message['data']}");
     add_user(message['data']);
-    print(f"✅ Registered user: {message['data']['user-name']} \n");
+    print(f"✅ Successfully registered user: {message['data']['user-name']} \n");
     return (True, "Registered user: " + message['data']['user-name']);
 
 # Register a disk process
@@ -144,9 +144,8 @@ def register_disk(message):
     #----------------------------------------------------------
 
     # Register the disk
-    print(f"Registering disk: {message['data']['disk-name']} with data {message['data']}");
     add_disk({**message['data'], "inDSS": False});
-    print(f"✅ Registered disk: {message['data']['disk-name']} \n");
+    print(f"✅ Successfully registered disk: {message['data']['disk-name']} \n");
     return (True, " Registered disk: " + message['data']['disk-name']);
 
 # Configure a dss
@@ -204,7 +203,7 @@ def configure_dss(message, addr):
         disk_data[disk_info['disk-name']] = disk_info;
         dss_data[message['data']['dss-name']]['disks'].append(disk_info['disk-name']);
 
-    print(f"✅ Configured DSS: {message['data']['dss-name']} \n");
+    print(f"✅ Successfully configured DSS: {message['data']['dss-name']} \n");
     return (True, "Configured DSS: " + message['data']['dss-name']);
 
 # Unregister a disk
@@ -236,9 +235,8 @@ def deregister_disk(message, addr):
     #----------------------------------------------------------
 
     # deregister the disk
-    print(f"Deregistering disk: {disk_name} with data {disk_info}");
     remove_disk(disk_info);
-    print(f"✅ Deregistered disk: {disk_name} \n");
+    print(f"✅ Successfully deregistered disk: {disk_name} \n");
     return (True, "Deregistered disk: " + disk_name);
 
 # Deregister a user
@@ -265,9 +263,8 @@ def deregister_user(message, addr):
     ############################################################
 
     # Deregister the user
-    print(f"Deregistering user: {user_name} with data {user_info}");
     remove_user(user_info);
-    print(f"✅ Deregistered user: {user_name} \n");
+    print(f"✅ Successfully deregistered user: {user_name} \n");
     return (True, "Deregistered user: " + message['data']['user-name']);
 
 #-----------------------------------------------------------------------------------
@@ -278,7 +275,10 @@ def deregister_user(message, addr):
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
     # Bind the socket to the IP and port provided
     s.bind((HOST, PORT));
-    print(f"UDP Server listening on {HOST}:{PORT} \n");
+    print(f"Manager server started successfully!")
+    print(f"Listening on {HOST}:{PORT}")
+    print(f"Port range: 31500-31999")
+    print("=" * 50)
     
     # start listening for messages from the user and disk processes
     while True:
@@ -295,14 +295,15 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             
             # If there is data, decode it and parse it as a json object
             message = json.loads(data.decode());
-            print(f"Manager received message from {addr[0]}:{addr[1]}");
+            print(f"Manager received message from {addr[0]}:{addr[1]}")
+            print(f"   Message data: {json.dumps(message, indent=2)}")
 
             # Check if the message has a type field
             if('type' not in message):
                 response(False, "Invalid message: Missing type field", addr);
                 continue;
 
-            print(f"Processing command {message['type']} from {addr[0]}:{addr[1]}");
+            print(f"Processing {message['type']} command from {addr[0]}:{addr[1]}")
             # Handle the message based on the type
             match message['type']:
                 case "register-user":

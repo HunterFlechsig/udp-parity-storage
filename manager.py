@@ -290,12 +290,14 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             
             # If there is data, decode it and parse it as a json object
             message = json.loads(data.decode());
+            print(f"Manager received message from {addr[0]}:{addr[1]}");
 
             # Check if the message has a type field
             if('type' not in message):
                 response(False, "Invalid message: Missing type field", addr);
                 continue;
 
+            print(f"Processing command {message['type']} from {addr[0]}:{addr[1]}");
             # Handle the message based on the type
             match message['type']:
                 case "register-user":

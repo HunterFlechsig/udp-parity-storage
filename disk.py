@@ -19,8 +19,8 @@ manager_address = (manager_ip, manager_port)
 
 #--------------- Get arguments ---------------#
 args = sys.argv[1:]
-options = "hn:i:m:c:d"
-long_options = ["name", "ip", "m-port", "c-port", "help"]
+options = "hn:i:m:c:M:P:h"
+long_options = ["name", "ip", "m-port", "c-port", "manager-ip", "manager-port", "help"]
 
 try:
     arguments, values = getopt.getopt(args, options, long_options)
@@ -31,7 +31,10 @@ try:
                 " -i, --ip: IP address of the disk (default: 127.0.0.1) \n"
                 " -m, --m-port: M port of the disk \n"
                 " -c, --c-port: C port of the disk \n"
+                " -M, --manager-ip: IP address of the manager (default: 127.0.0.1) \n"
+                " -P, --manager-port: Port of the manager (default: 31500) \n"
             )
+            sys.exit(0)
         elif currentArg in ("-n", "--name"):
             name = currentVal
         elif currentArg in ("-i", "--ip"):
@@ -47,6 +50,14 @@ try:
                 c_port = int(currentVal)
             except ValueError:
                 print("❌ Error: Invalid c-port (-c or --c-port) value")
+                sys.exit(1)
+        elif currentArg in ("-M", "--manager-ip"):
+            manager_ip = currentVal
+        elif currentArg in ("-P", "--manager-port"):
+            try:
+                manager_port = int(currentVal)
+            except ValueError:
+                print("❌ Error: Invalid manager-port (-P or --manager-port) value")
                 sys.exit(1)
 except getopt.error as err:
     print(str(err))
@@ -73,6 +84,14 @@ if not (ports[0] <= m_port <= ports[1]):
 if not (ports[0] <= c_port <= ports[1]):
     print(f"❌ Error: c-port {c_port} must be in range {ports[0]}-{ports[1]}")
     sys.exit(1)
+
+# Validate manager port range
+if not (ports[0] <= manager_port <= ports[1]):
+    print(f"❌ Error: manager-port {manager_port} must be in range {ports[0]}-{ports[1]}")
+    sys.exit(1)
+
+# Update manager address after parsing arguments
+manager_address = (manager_ip, manager_port)
 #--------------------------------------------------------#
 
 #---------------------- Commands to send messages to the manager ---------------------------------------
@@ -84,7 +103,7 @@ def send_deregister_disk():
             "disk-name": name
         }
     }
-    s.sendto(json.dumps(message).encode(), ("127.0.0.1", 65432));
+    s.sendto(json.dumps(message).encode(), manager_address);
     response = json.loads(s.recvfrom(1024)[0].decode());
     if response['status'] == 'success':
         print(f"✅ Disk {name} deregistered successfully \n");

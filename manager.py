@@ -91,7 +91,7 @@ def response(success, message, addr):
         "status": "success" if success else "failure",
         "message": message
     }
-
+    print(f"Sending response to {addr[0]}:{addr[1]} with data {data}");
     s.sendto(json.dumps(data).encode(), addr);
     return data;
 #-----------------------------------------------------------------------------------
@@ -118,6 +118,7 @@ def register_user(message):
     #----------------------------------------------------------
 
     # Register the user
+    print(f"Registering user: {message['data']['user-name']} with data {message['data']}");
     add_user(message['data']);
     print(f"✅ Registered user: {message['data']['user-name']} \n");
     return (True, "Registered user: " + message['data']['user-name']);
@@ -143,6 +144,7 @@ def register_disk(message):
     #----------------------------------------------------------
 
     # Register the disk
+    print(f"Registering disk: {message['data']['disk-name']} with data {message['data']}");
     add_disk({**message['data'], "inDSS": False});
     print(f"✅ Registered disk: {message['data']['disk-name']} \n");
     return (True, " Registered disk: " + message['data']['disk-name']);
@@ -189,6 +191,7 @@ def configure_dss(message, addr):
     ############################################################
 
     # configure the dss
+    print(f"Configuring DSS: {message['data']['dss-name']} with data {message['data']}");
     dss_data[message['data']['dss-name']] = {
         "disks": [],
         "striping-unit": striping_unit,
@@ -233,6 +236,7 @@ def deregister_disk(message, addr):
     #----------------------------------------------------------
 
     # deregister the disk
+    print(f"Deregistering disk: {disk_name} with data {disk_info}");
     remove_disk(disk_info);
     print(f"✅ Deregistered disk: {disk_name} \n");
     return (True, "Deregistered disk: " + disk_name);
@@ -261,6 +265,7 @@ def deregister_user(message, addr):
     ############################################################
 
     # Deregister the user
+    print(f"Deregistering user: {user_name} with data {user_info}");
     remove_user(user_info);
     print(f"✅ Deregistered user: {user_name} \n");
     return (True, "Deregistered user: " + message['data']['user-name']);

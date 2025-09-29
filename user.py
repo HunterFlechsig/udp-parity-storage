@@ -132,9 +132,10 @@ def send_deregister_user():
         }
     }
     # send the message to the manager
+    print(f"Sending deregister-user message to {manager_address} with data {message} ");
     s.sendto(json.dumps(message).encode(), manager_address);
     response = json.loads(s.recvfrom(1024)[0].decode());
-
+    print(f"Received response from {manager_address} with data {response} ");
     if response['status'] == 'success':
         print(f"✅ User {name} deregistered successfully \n");
         sys.exit(0);
@@ -155,9 +156,10 @@ def send_register_user():
         }
     }
     # send the message to the manager
+    print(f"Sending register-user message to {manager_address} with data {message} ");
     s.sendto(json.dumps(message).encode(), manager_address);
     response = json.loads(s.recvfrom(1024)[0].decode());
-
+    print(f"Received response from {manager_address} with data {response} ");
     if response['status'] == 'success':
         print(f"✅ User {name} registered successfully \n");
         return;

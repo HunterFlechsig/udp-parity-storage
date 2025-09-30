@@ -86,10 +86,14 @@ def remove_disk(disk):
     disk_data.pop(disk['disk-name']);
 
 # Helper to send a response to the user or disk process
-def response(success, message, addr):
+def response(type,success, message, addr, data = None):
     data = {
-        "status": "success" if success else "failure",
-        "message": message
+        "type": "response",
+        "data": {
+            "status": "success" if success else "failure",
+            "message": message,
+            "response-data": data
+        }
     }
     print(f"Sending response to {addr[0]}:{addr[1]}")
     print(f"   Response data: {json.dumps(data, indent=2)}")
@@ -98,6 +102,7 @@ def response(success, message, addr):
 #-----------------------------------------------------------------------------------
 
 #----------------------- Commands to handle messages from user and disk processes -----------------------#
+
 # Register a user process
 def register_user(message):
     # Check if all required fields exist
@@ -266,6 +271,23 @@ def deregister_user(message, addr):
     remove_user(user_info);
     print(f"✅ Successfully deregistered user: {user_name} \n");
     return (True, "Deregistered user: " + message['data']['user-name']);
+
+# Copy a file to the dss
+def copy(message, addr):
+    # Check if all required fields exist
+    required_fields = ['file-name', 'file-size', 'owner'];
+    for field in required_fields:
+        if field not in message['data']:
+            print(f"❌ Missing field: {field}");
+            return (False, "Missing field: " + field);
+
+    file_name = message['data']['file-name']
+    file_size = message['data']['file-size']
+    owner = message['data']['owner']
+
+    message = {
+        
+    }
 
 #-----------------------------------------------------------------------------------
     

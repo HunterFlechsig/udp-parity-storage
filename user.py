@@ -5,7 +5,7 @@
 
 import socket;
 import json;
-import getopt, sys
+import getopt, sys, os
 
 name = None
 ip = "192.168.0.25"
@@ -114,16 +114,16 @@ def send_configure_dss():
     # send the message to the manager
     print(f"Sending configure-dss message to {manager_address[0]}:{manager_address[1]}")
     print(f"   Message data: {json.dumps(message, indent=2)}")
-    s.sendto(json.dumps(message).encode(), manager_address);
-    response = json.loads(s.recvfrom(1024)[0].decode());
+    manager_socket.sendto(json.dumps(message).encode(), manager_address);
+    response = json.loads(manager_socket.recvfrom(1024)[0].decode());
     print(f"Received response from {manager_address[0]}:{manager_address[1]}")
     print(f"   Response data: {json.dumps(response, indent=2)}")
 
-    if response['status'] == 'failure':
+    if response['data']['status'] == 'failure':
         print(f"❌ Error: {response['message']} \n");
         return;
 
-    if response['status'] == 'success':
+    if response['data']['status'] == 'success':
         print(f"✅ DSS {dss_name} configured successfully \n");
 
 # Deregister a user
@@ -138,15 +138,15 @@ def send_deregister_user():
     # send the message to the manager
     print(f"Sending deregister-user message to {manager_address[0]}:{manager_address[1]}")
     print(f"   Message data: {json.dumps(message, indent=2)}")
-    s.sendto(json.dumps(message).encode(), manager_address);
-    response = json.loads(s.recvfrom(1024)[0].decode());
+    manager_socket.sendto(json.dumps(message).encode(), manager_address);
+    response = json.loads(manager_socket.recvfrom(1024)[0].decode());
     print(f"Received response from {manager_address[0]}:{manager_address[1]}")
     print(f"   Response data: {json.dumps(response, indent=2)}")
-    if response['status'] == 'success':
+    if response['data']['status'] == 'success':
         print(f"✅ User {name} deregistered successfully \n");
         sys.exit(0);
 
-    if response['status'] == 'failure':
+    if response['data']['status'] == 'failure':
         print(f"❌ Error: {response['message']} \n try again...\n");
 
 # Register a user
@@ -164,52 +164,121 @@ def send_register_user():
     # send the message to the manager
     print(f"Sending register-user message to {manager_address[0]}:{manager_address[1]}")
     print(f"   Message data: {json.dumps(message, indent=2)}")
-    s.sendto(json.dumps(message).encode(), manager_address);
-    response = json.loads(s.recvfrom(1024)[0].decode());
+    manager_socket.sendto(json.dumps(message).encode(), manager_address);
+    response = json.loads(manager_socket.recvfrom(1024)[0].decode());
     print(f"Received response from {manager_address[0]}:{manager_address[1]}")
     print(f"   Response data: {json.dumps(response, indent=2)}")
-    if response['status'] == 'success':
+    if response['data']['status'] == 'success':
         print(f"✅ User {name} registered successfully \n");
         return;
 
-    if response['status'] == 'failure':
+    if response['data']['status'] == 'failure':
         print(f"❌ Error Registering User: {response['message']} \n");
+        sys.exit(1);
+
+def send_copy_to_disk(disk_address, stripe, block_type):
+    message = {
+        "type": "copy",
+        "data": {
+            "stripe": stripe,
+            "block-type": block_type
+        }
+    }
+
+    print(f"Sending copy message to {disk_address[0]}:{disk_address[1]}")
+    print(f"   Message data: {json.dumps(message, indent=2)}")
+    disk_socket.sendto(json.dumps(message).encode(), disk_address);
+    response = json.loads(disk_socket.recvfrom(1024)[0].decode());
+    print(f"Received response from {disk_address[0]}:{disk_address[1]}")
+    print(f"   Response data: {json.dumps(response, indent=2)}")
+
+# Send a copy message to the disks
+def send_copy_to_disks(data, file_name, file_size):
+    dss_name = data['dss-name']
+    n = data['n']
+    striping_unit = data['striping-unit']
+    disks = data['disks']
+
+    with open(file_name, "rb") as file:
+        file_data = file.read()
+
+    for disk in disks:
+        print(disk)
+
+    
+
+# Send a copy message to the manager
+def send_copy_file_to_dss():
+    file_name = input("Enter file name: ");
+    owner = input("Enter owner: ");
+    file_size = os.path.getsize("./" + file_name)
+
+    message = {
+        "type": "copy",
+        "data": {
+            "file-name": file_name,
+            "file-size": file_size,
+            "owner": owner
+        }
+    }
+
+    print(f"Sending copy message to {manager_address[0]}:{manager_address[1]}")
+    print(f"   Message data: {json.dumps(message, indent=2)}")
+
+    manager_socket.sendto(json.dumps(message).encode(), manager_address);
+    response = json.loads(manager_socket.recvfrom(1024)[0].decode());
+
+    print(f"Received response from {manager_address[0]}:{manager_address[1]}")
+    print(f"   Response data: {json.dumps(response, indent=2)}")
+
+    if response['data']['status'] == 'success':
+        print(f"✅ Manager has accepted the copy request \n");
+        send_copy_to_disks(response['data']['response-data'], file_name)
+        return;
+    
+    if response['data']['status'] == 'failure':
+        print(f"❌ Error Copying File: {response['message']} \n");
         sys.exit(1);
 
 # ---------------------------------------------------------------
 
 # AF_INET is the address family for IPv4
 # SOCK_DGRAM is the socket type for UDP
-with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as manager_socket:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as disk_socket:
 
-# ------ start socket and register the user with manager ---------------------
-    # Bind the socket to the IP and port provided
-    s.bind((ip, m_port));
-    print(f"User {name} started on {ip}:{m_port} \n");
+    # ------ start socket and register the user with manager ---------------------
+        # Bind the socket to the IP and port provided
+        manager_socket.bind((ip, m_port));
+        disk_socket.bind((ip, c_port));
+        print(f"User {name} started on {ip}:{m_port} \n");
 
-    send_register_user()
-# ---------------------------------------------------------------
+        send_register_user()
+    # ---------------------------------------------------------------
 
-# ------ start commands loop ---------------------
-    while True:
-        try:
-            print ("Commands: \n"
-                "1. configure-dss \n"
-                "2. deregister-user and exit \n"
-                "3. exit \n"
-            )
-            command = input("Enter command: ");
+    # ------ start commands loop ---------------------
+        while True:
+            try:
+                print ("Commands: \n"
+                    "1. configure-dss \n"
+                    "2. deregister-user and exit \n"
+                    "3. copy file to dss \n"
+                    "4. exit \n"
+                )
+                command = input("Enter command: ");
 
-            match command:
-                case "1":
-                    send_configure_dss()
-                case "2":
-                    send_deregister_user()
-                case "3":
-                    sys.exit(0)
-                case _:
-                    print("Invalid command \n");
- 
-        except KeyboardInterrupt:
-            print("\nCtrl+C pressed, shutting down...")
-            break;
+                match command:
+                    case "1":
+                        send_configure_dss()
+                    case "2":
+                        send_deregister_user()
+                    case "3":
+                        send_copy_file_to_dss()
+                    case "4":
+                        sys.exit(0)
+                    case _:
+                        print("Invalid command \n");
+    
+            except KeyboardInterrupt:
+                print("\nCtrl+C pressed, shutting down...")
+                break;

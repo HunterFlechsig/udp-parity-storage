@@ -1,284 +1,359 @@
-# user.py
+# user_threaded_v1.py
 # Hunter Flechsig, 1225292005
-# Create a user process
-# User process uses the manager to configure the dss and disks and uses the dss to store and retrieve data
+# Approach #1: Separate Threads for Each Port
+# User process uses separate threads to manage manager (m) and client (c) ports
 
-import socket;
-import json;
-import getopt, sys, os
+import socket
+import json
+import threading
+import time
+import getopt
+import sys
+import os
 
-name = None
-ip = "192.168.0.25"
-m_port = None
-c_port = None
-ports = [31500, 31999]
+class UserProcess:
+    def __init__(self, name, ip, m_port, c_port, manager_address):
+        self.name = name
+        self.ip = ip
+        self.m_port = m_port
+        self.c_port = c_port
+        self.manager_address = manager_address
+        self.running = True
+        self.registered = False
+        self.manager_socket = None
+        self.command_socket = None
 
-manager_ip = "192.168.0.229"
-manager_port = ports[0]
-manager_address = (manager_ip, manager_port)
+        # thread safe data structures
+        self.lock = threading.Lock()
 
-#--------------- Get arguments ---------------#
-args = sys.argv[1:]
-options = "hn:i:m:c:M:P:h"
-long_options = ["name", "ip", "m-port", "c-port", "manager-ip", "manager-port", "help"]
+    def handle_manager_port(self):
+        """Handle manager port (m_port)"""
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as self.manager_socket:
+            self.manager_socket.bind((self.ip, self.m_port))
+            print(f"✅ Manager port {self.m_port} listening on {self.ip}")
 
-try:
-    arguments, values = getopt.getopt(args, options, long_options)
-    for currentArg, currentVal in arguments:
-        if currentArg in ("-h", "--help"):
-            print("Showing Help \n" 
-                " -n, --name: Name of the user \n"
-                " -i, --ip: IP address of the user (default: 127.0.0.1) \n"
-                " -m, --m-port: M port of the user \n"
-                " -c, --c-port: C port of the user \n"
-                " -M, --manager-ip: IP address of the manager (default: 192.168.0.229) \n"
-                " -P, --manager-port: Port of the manager (default: 31500) \n"
-            )
-            sys.exit(0)
-        elif currentArg in ("-n", "--name"):
-            name = currentVal
-        elif currentArg in ("-i", "--ip"):
-            ip = currentVal
-        elif currentArg in ("-m", "--m-port"):
+            while self.running:
+                try:
+                    self.manager_socket.settimeout(1.0) # allow checking self.running
+                    data, addr = self.manager_socket.recvfrom(1024)
+                    message = json.loads(data.decode())
+
+                    print("=" * 20)
+                    print(f"Manager port received from {addr[0]}:{addr[1]}")
+                    print(f"   Message: {json.dumps(message, indent=2)}")
+
+                    # process manager messages
+                    self.process_manager_message(message)
+
+                    print("=" * 20)
+                
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if self.running:
+                        print(f"❌ Manager port error: {e}")
+    
+    def handle_command_port(self):
+        """Handle command port (c_port)"""
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as self.command_socket:
             try:
-                m_port = int(currentVal)
-            except ValueError:
-                print("❌ Error: Invalid m-port (-m or --m-port) value")
-                sys.exit(1)
-        elif currentArg in ("-c", "--c-port"):
-            try:
-                c_port = int(currentVal)
-            except ValueError:
-                print("❌ Error: Invalid c-port (-c or --c-port) value")
-                sys.exit(1)
-        elif currentArg in ("-M", "--manager-ip"):
-            manager_ip = currentVal
-        elif currentArg in ("-P", "--manager-port"):
-            try:
-                manager_port = int(currentVal)
-            except ValueError:
-                print("❌ Error: Invalid manager-port (-P or --manager-port) value")
-                sys.exit(1)
-except getopt.error as err:
-    print(str(err))
+                self.command_socket.bind((self.ip, self.c_port))
+            except Exception as e:
+                print(f"❌ Error binding client port: {e}")
+                self.running = False
+                return
 
-# check if all arguments are provided
-if name is None or ip is None or m_port is None or c_port is None:
-    print("❌ Error: Missing required arguments:")
-    if name is None:
-        print("  - Missing name (-n or --name)")
-    if ip is None:
-        print("  - Missing IP (-i or --ip)")
-    if m_port is None:
-        print("  - Missing m-port (-m or --m-port)")
-    if c_port is None:
-        print("  - Missing c-port (-c or --c-port)")
-    print("Use -h or --help for usage information\n")
-    sys.exit(1)
+            print(f"✅ Client port {self.c_port} listening on {self.ip}")
 
-# Validate port ranges
-if not (ports[0] <= m_port <= ports[1]):
-    print(f"❌ Error: m-port {m_port} must be in range {ports[0]}-{ports[1]}")
-    sys.exit(1)
+            while self.running:
+                try:
+                    self.command_socket.settimeout(1.0) # allow checking self.running
+                    data, addr = self.command_socket.recvfrom(1024)
+                    message = json.loads(data.decode())
+                    print("--------------------------------")
+                    print(f"Client port received from {addr[0]}:{addr[1]}")
+                    print(f"   Message: {json.dumps(message, indent=2)}")
+                    
+                    # process client messages
+                    self.process_command_message(message)
 
-if not (ports[0] <= c_port <= ports[1]):
-    print(f"❌ Error: c-port {c_port} must be in range {ports[0]}-{ports[1]}")
-    sys.exit(1)
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if self.running:
+                        print(f"❌ Client port error: {e}")
 
-# Validate manager port range
-if not (ports[0] <= manager_port <= ports[1]):
-    print(f"❌ Error: manager-port {manager_port} must be in range {ports[0]}-{ports[1]}")
-    sys.exit(1)
+    # ---------------------------------------------------------------
+    
+    def process_manager_message(self, message):
+        """Process messages received on manager port"""
+        print(f"Manager response: {message.get('data', {}).get('status', 'No status')}")
+        print(f"{message.get('data', {}).get('message', 'No message')}")
+        try:
+            match message.get('type'):
+                case 'register-user':
 
-# Update manager address after parsing arguments
-manager_address = (manager_ip, manager_port)
-#--------------------------------------------------------#
+                    if message.get('data', {}).get('status', 'No status') == 'success':
+                            self.registered = True
+                    else:
+                            self.running = False
+                            sys.exit(1)
 
-# ------ Command functions ---------------------
-# Configure a dss
-def send_configure_dss():
-    # get the dss name, number of disks, and striping unit from the user
-    dss_name = input("Enter DSS name: ");
-    n = input("Enter number of disks: ");
-    striping_unit = input("Enter striping unit: ");
+                case 'deregister-user':
 
-# constructe configure-dss message
-    message = {
-        "type": "configure-dss",
-        "data": {
-            "dss-name": dss_name,
-            "n": n,
-            "striping-unit": striping_unit
-        }
-    }
-    # send the message to the manager
-    print(f"Sending configure-dss message to {manager_address[0]}:{manager_address[1]}")
-    print(f"   Message data: {json.dumps(message, indent=2)}")
-    manager_socket.sendto(json.dumps(message).encode(), manager_address);
-    response = json.loads(manager_socket.recvfrom(1024)[0].decode());
-    print(f"Received response from {manager_address[0]}:{manager_address[1]}")
-    print(f"   Response data: {json.dumps(response, indent=2)}")
+                    if message.get('data', {}).get('status', 'No status') == 'success':
+                        self.running = False
+                        self.registered = False
+                        sys.exit(0)
 
-    if response['data']['status'] == 'failure':
-        print(f"❌ Error: {response['message']} \n");
-        return;
 
-    if response['data']['status'] == 'success':
-        print(f"✅ DSS {dss_name} configured successfully \n");
+                case 'copy':
+                    self.handle_copy(message)
 
-# Deregister a user
-def send_deregister_user():
-    # constructe deregister-user message
-    message = {
-        "type": "deregister-user",
-        "data": {
-            "user-name": name
-        }
-    }
-    # send the message to the manager
-    print(f"Sending deregister-user message to {manager_address[0]}:{manager_address[1]}")
-    print(f"   Message data: {json.dumps(message, indent=2)}")
-    manager_socket.sendto(json.dumps(message).encode(), manager_address);
-    response = json.loads(manager_socket.recvfrom(1024)[0].decode());
-    print(f"Received response from {manager_address[0]}:{manager_address[1]}")
-    print(f"   Response data: {json.dumps(response, indent=2)}")
-    if response['data']['status'] == 'success':
-        print(f"✅ User {name} deregistered successfully \n");
-        sys.exit(0);
+                case 'configure-dss':
+                    return
+                
+                case _:
+                    print(f"Unknown manager message: {message.get('type', 'Unknown type')}")
+                    return
 
-    if response['data']['status'] == 'failure':
-        print(f"❌ Error: {response['message']} \n try again...\n");
-
-# Register a user
-def send_register_user():
-    # constructe register-user message
-    message = {
-        "type": "register-user",
-        "data": {
-            "user-name": name,
-            "Ipv4": ip,
-            "m-port": int(m_port),
-            "c-port": int(c_port)
-        }
-    }
-    # send the message to the manager
-    print(f"Sending register-user message to {manager_address[0]}:{manager_address[1]}")
-    print(f"   Message data: {json.dumps(message, indent=2)}")
-    manager_socket.sendto(json.dumps(message).encode(), manager_address);
-    response = json.loads(manager_socket.recvfrom(1024)[0].decode());
-    print(f"Received response from {manager_address[0]}:{manager_address[1]}")
-    print(f"   Response data: {json.dumps(response, indent=2)}")
-    if response['data']['status'] == 'success':
-        print(f"✅ User {name} registered successfully \n");
-        return;
-
-    if response['data']['status'] == 'failure':
-        print(f"❌ Error Registering User: {response['message']} \n");
-        sys.exit(1);
-
-def send_copy_to_disk(disk_address, stripe, block_type):
-    message = {
-        "type": "copy",
-        "data": {
-            "stripe": stripe,
-            "block-type": block_type
-        }
-    }
-
-    print(f"Sending copy message to {disk_address[0]}:{disk_address[1]}")
-    print(f"   Message data: {json.dumps(message, indent=2)}")
-    disk_socket.sendto(json.dumps(message).encode(), disk_address);
-    response = json.loads(disk_socket.recvfrom(1024)[0].decode());
-    print(f"Received response from {disk_address[0]}:{disk_address[1]}")
-    print(f"   Response data: {json.dumps(response, indent=2)}")
-
-# Send a copy message to the disks
-def send_copy_to_disks(data, file_name, file_size):
-    dss_name = data['dss-name']
-    n = data['n']
-    striping_unit = data['striping-unit']
-    disks = data['disks']
-
-    with open(file_name, "rb") as file:
-        file_data = file.read()
-
-    for disk in disks:
-        print(disk)
+        except Exception as e:
+            print(f"Error processing manager message: {e}")
 
     
+    def process_command_message(self, message):
+        """Process messages received on command port"""
+        try:
+            print(f"Processing client message: {message.get('type', 'Unknown type')}")
+            # add client-specific message handling here
+        except Exception as e:
+            print(f"Error processing client message: {e}")
 
-# Send a copy message to the manager
-def send_copy_file_to_dss():
-    file_name = input("Enter file name: ");
-    owner = input("Enter owner: ");
-    file_size = os.path.getsize("./" + file_name)
-
-    message = {
-        "type": "copy",
-        "data": {
-            "file-name": file_name,
-            "file-size": file_size,
-            "owner": owner
-        }
-    }
-
-    print(f"Sending copy message to {manager_address[0]}:{manager_address[1]}")
-    print(f"   Message data: {json.dumps(message, indent=2)}")
-
-    manager_socket.sendto(json.dumps(message).encode(), manager_address);
-    response = json.loads(manager_socket.recvfrom(1024)[0].decode());
-
-    print(f"Received response from {manager_address[0]}:{manager_address[1]}")
-    print(f"   Response data: {json.dumps(response, indent=2)}")
-
-    if response['data']['status'] == 'success':
-        print(f"✅ Manager has accepted the copy request \n");
-        send_copy_to_disks(response['data']['response-data'], file_name)
-        return;
     
-    if response['data']['status'] == 'failure':
-        print(f"❌ Error Copying File: {response['message']} \n");
-        sys.exit(1);
+    # ------------------- Response handlers ------------------------------
 
-# ---------------------------------------------------------------
+    def handle_copy(self, message):
+        """Handle copy message"""
+        # TODO: Implement copy message handling
 
-# AF_INET is the address family for IPv4
-# SOCK_DGRAM is the socket type for UDP
-with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as manager_socket:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as disk_socket:
+        message = {
+            "type": "copy-complete",
+            "data": {}
+        }
+        self.send_to_manager(message)
 
-    # ------ start socket and register the user with manager ---------------------
-        # Bind the socket to the IP and port provided
-        manager_socket.bind((ip, m_port));
-        disk_socket.bind((ip, c_port));
-        print(f"User {name} started on {ip}:{m_port} \n");
-
-        send_register_user()
     # ---------------------------------------------------------------
 
-    # ------ start commands loop ---------------------
-        while True:
-            try:
-                print ("Commands: \n"
-                    "1. configure-dss \n"
-                    "2. deregister-user and exit \n"
-                    "3. copy file to dss \n"
-                    "4. exit \n"
-                )
-                command = input("Enter command: ");
+    def send_to_manager(self, message):
+        """Send message to manager and return response"""
+        self.manager_socket.sendto(json.dumps(message).encode(), self.manager_address)
 
-                match command:
-                    case "1":
-                        send_configure_dss()
-                    case "2":
-                        send_deregister_user()
-                    case "3":
-                        send_copy_file_to_dss()
-                    case "4":
-                        sys.exit(0)
-                    case _:
-                        print("Invalid command \n");
+    def send_to_command(self, message):
+        """Send message to command and return response"""
+        self.command_socket.sendto(json.dumps(message).encode(), self.command_address)
+
+    # ---------------------------------------------------------------
+
+    def send_register_user(self):
+        """Send register user message to manager"""
+        message = {
+            "type": "register-user",
+            "data": {
+                "user-name": self.name,
+                "Ipv4": self.ip,
+                "m-port": self.m_port,
+                "c-port": self.c_port
+            }
+        }
+        self.send_to_manager(message)
+        print(f"Register user message sent to manager address {self.manager_address[0]}:{self.manager_address[1]}")
+        print(f"   Message: {json.dumps(message, indent=2)}")
+
+    def send_deregister_user(self):
+        """Send deregister user message to manager"""
+        message = {
+            "type": "deregister-user",
+            "data": {
+                "user-name": self.name
+            }
+        }
+        self.send_to_manager(message)
+
+    def send_configure_dss(self):
+        """Send configure dss message to manager"""
+        dss_name = input("Enter DSS name: ")
+        n = input("Enter number of disks: ")
+        striping_unit = input("Enter striping unit: ")
+        
+        message = {
+            "type": "configure-dss",
+            "data": {
+                "dss-name": dss_name,
+                "n": n,
+                "striping-unit": striping_unit
+            }
+        }
+        self.send_to_manager(message)
     
-            except KeyboardInterrupt:
-                print("\nCtrl+C pressed, shutting down...")
-                break;
+    def send_copy_file_to_dss(self):
+        """Send copy file to dss message to manager"""
+        file_name = input("Enter file name: ")
+        owner = input("Enter owner: ")
+        file_size = os.path.getsize("./" + file_name)
+        
+        message = {
+            "type": "copy",
+            "data": {
+                "file-name": file_name,
+                "file-size": file_size,
+                "owner": owner
+            }
+        }
+        self.send_to_manager(message)
+
+    # ---------------------------------------------------------------
+
+
+    # ---------------------------------------------------------------
+
+    def start(self):
+        """Start the user process"""
+
+        """Start both port handlers in separate threads"""
+        print(f"Starting user process: {self.name}")
+        print(f"Manager port: {self.ip}:{self.m_port}")
+        print(f"Client port: {self.ip}:{self.c_port}")
+        print(f"Manager address: {self.manager_address[0]}:{self.manager_address[1]}")
+        print("--------------------------------")
+
+        # Create separate threads for each port
+        manager_thread = threading.Thread(target=self.handle_manager_port, daemon=True)
+        command_thread = threading.Thread(target=self.handle_command_port, daemon=True)
+
+        # Start both threads
+        manager_thread.start()
+        command_thread.start()
+
+        # Give threads time to start
+        time.sleep(0.5)
+
+        print("=" * 60)
+
+        # Register with manager
+        if self.running:
+            self.send_register_user()
+        else:
+            return
+        
+        # Main command loop
+        try:
+            while self.running:
+
+                # Only show commands if user is registered
+                if not self.registered:
+                    time.sleep(0.1)                    
+                    continue
+
+                """Print commands"""
+                print("\n" + "=" * 40)
+                print("Commands:")
+                print("1. configure-dss")
+                print("2. deregister-user")
+                print("3. copy file to dss")
+                print("4. reprint commands")
+                print("5. exit")
+                print("=" * 40)
+                
+                command = input("Enter command: ").strip()
+                    
+                if command == "1":
+                    self.send_configure_dss()
+                elif command == "2":
+                    self.send_deregister_user()
+                elif command == "3":
+                    self.send_copy_file_to_dss()
+                elif command == "4":
+                    continue
+                elif command == "5":
+                    break
+                else:
+                    print("❌ Invalid command")
+        
+        except KeyboardInterrupt:
+            print("\n Ctrl+C pressed, shutting down...")
+        finally:
+            print("Shutting down user process...")
+            self.running = False
+            print("Shutdown complete")
+
+
+def main():
+    """Main function to parse command line arguments and start the user process"""
+
+    name = None
+    ip = "127.0.0.1"
+    m_port = None
+    c_port = None
+    ports = [31500, 31999]
+    
+    manager_ip = "127.0.0.1"
+    manager_port = ports[0]
+
+    args = sys.argv[1:]
+    options = "hn:i:m:c:M:P:h"
+
+    try: 
+        arguments, values = getopt.getopt(args, options)
+        for currentArg, currentVal in arguments:
+            if currentArg in ("-h", "--help"):
+                print("User Process Help \n" 
+                    " -n: Name of the user (required) \n"
+                    " -i: IP address of the user (default: 127.0.0.1) \n"
+                    " -m: M port of the user (required) \n"
+                    " -c: C port of the user (required) \n"
+                    " -M: IP address of the manager (default: 127.0.0.1) \n"
+                    " -P: Port of the manager (default: 31500) \n"
+                )
+                sys.exit(0)
+            elif currentArg in ("-n"):
+                name = currentVal
+            elif currentArg in ("-i"):
+                ip = currentVal
+            elif currentArg in ("-m"):
+                m_port = int(currentVal)
+            elif currentArg in ("-c"):
+                c_port = int(currentVal)
+            elif currentArg in ("-M"):
+                manager_ip = currentVal
+            elif currentArg in ("-P"):
+                manager_port = int(currentVal)
+    except getopt.error as err:
+        print(str(err))
+        sys.exit(1)
+
+        # Validate port ranges
+    if not (ports[0] <= m_port <= ports[1]):
+        print(f"❌ Error: m-port {m_port} must be in range {ports[0]}-{ports[1]}")
+        sys.exit(1)
+    
+    if not (ports[0] <= c_port <= ports[1]):
+        print(f"❌ Error: c-port {c_port} must be in range {ports[0]}-{ports[1]}")
+        sys.exit(1)
+    
+    if not (ports[0] <= manager_port <= ports[1]):
+        print(f"❌ Error: manager-port {manager_port} must be in range {ports[0]}-{ports[1]}")
+        sys.exit(1)
+
+    if name is None or ip is None or m_port is None or c_port is None:
+        print("❌ Error: Missing a required argument")
+        sys.exit(1)
+
+    manager_address = (manager_ip, manager_port)
+    
+    # Create and start user process
+    user = UserProcess(name, ip, m_port, c_port, manager_address)
+    user.start()
+
+if __name__ == "__main__":
+    main()
+            

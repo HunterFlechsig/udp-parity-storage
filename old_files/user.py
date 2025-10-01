@@ -1,0 +1,284 @@
+# user.py
+# Hunter Flechsig, 1225292005
+# Create a user process
+# User process uses the manager to configure the dss and disks and uses the dss to store and retrieve data
+
+import socket;
+import json;
+import getopt, sys, os
+
+name = None
+ip = "192.168.0.25"
+m_port = None
+c_port = None
+ports = [31500, 31999]
+
+manager_ip = "192.168.0.229"
+manager_port = ports[0]
+manager_address = (manager_ip, manager_port)
+
+#--------------- Get arguments ---------------#
+args = sys.argv[1:]
+options = "hn:i:m:c:M:P:h"
+long_options = ["name", "ip", "m-port", "c-port", "manager-ip", "manager-port", "help"]
+
+try:
+    arguments, values = getopt.getopt(args, options, long_options)
+    for currentArg, currentVal in arguments:
+        if currentArg in ("-h", "--help"):
+            print("Showing Help \n" 
+                " -n, --name: Name of the user \n"
+                " -i, --ip: IP address of the user (default: 127.0.0.1) \n"
+                " -m, --m-port: M port of the user \n"
+                " -c, --c-port: C port of the user \n"
+                " -M, --manager-ip: IP address of the manager (default: 192.168.0.229) \n"
+                " -P, --manager-port: Port of the manager (default: 31500) \n"
+            )
+            sys.exit(0)
+        elif currentArg in ("-n", "--name"):
+            name = currentVal
+        elif currentArg in ("-i", "--ip"):
+            ip = currentVal
+        elif currentArg in ("-m", "--m-port"):
+            try:
+                m_port = int(currentVal)
+            except ValueError:
+                print("❌ Error: Invalid m-port (-m or --m-port) value")
+                sys.exit(1)
+        elif currentArg in ("-c", "--c-port"):
+            try:
+                c_port = int(currentVal)
+            except ValueError:
+                print("❌ Error: Invalid c-port (-c or --c-port) value")
+                sys.exit(1)
+        elif currentArg in ("-M", "--manager-ip"):
+            manager_ip = currentVal
+        elif currentArg in ("-P", "--manager-port"):
+            try:
+                manager_port = int(currentVal)
+            except ValueError:
+                print("❌ Error: Invalid manager-port (-P or --manager-port) value")
+                sys.exit(1)
+except getopt.error as err:
+    print(str(err))
+
+# check if all arguments are provided
+if name is None or ip is None or m_port is None or c_port is None:
+    print("❌ Error: Missing required arguments:")
+    if name is None:
+        print("  - Missing name (-n or --name)")
+    if ip is None:
+        print("  - Missing IP (-i or --ip)")
+    if m_port is None:
+        print("  - Missing m-port (-m or --m-port)")
+    if c_port is None:
+        print("  - Missing c-port (-c or --c-port)")
+    print("Use -h or --help for usage information\n")
+    sys.exit(1)
+
+# Validate port ranges
+if not (ports[0] <= m_port <= ports[1]):
+    print(f"❌ Error: m-port {m_port} must be in range {ports[0]}-{ports[1]}")
+    sys.exit(1)
+
+if not (ports[0] <= c_port <= ports[1]):
+    print(f"❌ Error: c-port {c_port} must be in range {ports[0]}-{ports[1]}")
+    sys.exit(1)
+
+# Validate manager port range
+if not (ports[0] <= manager_port <= ports[1]):
+    print(f"❌ Error: manager-port {manager_port} must be in range {ports[0]}-{ports[1]}")
+    sys.exit(1)
+
+# Update manager address after parsing arguments
+manager_address = (manager_ip, manager_port)
+#--------------------------------------------------------#
+
+# ------ Command functions ---------------------
+# Configure a dss
+def send_configure_dss():
+    # get the dss name, number of disks, and striping unit from the user
+    dss_name = input("Enter DSS name: ");
+    n = input("Enter number of disks: ");
+    striping_unit = input("Enter striping unit: ");
+
+# constructe configure-dss message
+    message = {
+        "type": "configure-dss",
+        "data": {
+            "dss-name": dss_name,
+            "n": n,
+            "striping-unit": striping_unit
+        }
+    }
+    # send the message to the manager
+    print(f"Sending configure-dss message to {manager_address[0]}:{manager_address[1]}")
+    print(f"   Message data: {json.dumps(message, indent=2)}")
+    manager_socket.sendto(json.dumps(message).encode(), manager_address);
+    response = json.loads(manager_socket.recvfrom(1024)[0].decode());
+    print(f"Received response from {manager_address[0]}:{manager_address[1]}")
+    print(f"   Response data: {json.dumps(response, indent=2)}")
+
+    if response['data']['status'] == 'failure':
+        print(f"❌ Error: {response['message']} \n");
+        return;
+
+    if response['data']['status'] == 'success':
+        print(f"✅ DSS {dss_name} configured successfully \n");
+
+# Deregister a user
+def send_deregister_user():
+    # constructe deregister-user message
+    message = {
+        "type": "deregister-user",
+        "data": {
+            "user-name": name
+        }
+    }
+    # send the message to the manager
+    print(f"Sending deregister-user message to {manager_address[0]}:{manager_address[1]}")
+    print(f"   Message data: {json.dumps(message, indent=2)}")
+    manager_socket.sendto(json.dumps(message).encode(), manager_address);
+    response = json.loads(manager_socket.recvfrom(1024)[0].decode());
+    print(f"Received response from {manager_address[0]}:{manager_address[1]}")
+    print(f"   Response data: {json.dumps(response, indent=2)}")
+    if response['data']['status'] == 'success':
+        print(f"✅ User {name} deregistered successfully \n");
+        sys.exit(0);
+
+    if response['data']['status'] == 'failure':
+        print(f"❌ Error: {response['message']} \n try again...\n");
+
+# Register a user
+def send_register_user():
+    # constructe register-user message
+    message = {
+        "type": "register-user",
+        "data": {
+            "user-name": name,
+            "Ipv4": ip,
+            "m-port": int(m_port),
+            "c-port": int(c_port)
+        }
+    }
+    # send the message to the manager
+    print(f"Sending register-user message to {manager_address[0]}:{manager_address[1]}")
+    print(f"   Message data: {json.dumps(message, indent=2)}")
+    manager_socket.sendto(json.dumps(message).encode(), manager_address);
+    response = json.loads(manager_socket.recvfrom(1024)[0].decode());
+    print(f"Received response from {manager_address[0]}:{manager_address[1]}")
+    print(f"   Response data: {json.dumps(response, indent=2)}")
+    if response['data']['status'] == 'success':
+        print(f"✅ User {name} registered successfully \n");
+        return;
+
+    if response['data']['status'] == 'failure':
+        print(f"❌ Error Registering User: {response['message']} \n");
+        sys.exit(1);
+
+def send_copy_to_disk(disk_address, stripe, block_type):
+    message = {
+        "type": "copy",
+        "data": {
+            "stripe": stripe,
+            "block-type": block_type
+        }
+    }
+
+    print(f"Sending copy message to {disk_address[0]}:{disk_address[1]}")
+    print(f"   Message data: {json.dumps(message, indent=2)}")
+    disk_socket.sendto(json.dumps(message).encode(), disk_address);
+    response = json.loads(disk_socket.recvfrom(1024)[0].decode());
+    print(f"Received response from {disk_address[0]}:{disk_address[1]}")
+    print(f"   Response data: {json.dumps(response, indent=2)}")
+
+# Send a copy message to the disks
+def send_copy_to_disks(data, file_name, file_size):
+    dss_name = data['dss-name']
+    n = data['n']
+    striping_unit = data['striping-unit']
+    disks = data['disks']
+
+    with open(file_name, "rb") as file:
+        file_data = file.read()
+
+    for disk in disks:
+        print(disk)
+
+    
+
+# Send a copy message to the manager
+def send_copy_file_to_dss():
+    file_name = input("Enter file name: ");
+    owner = input("Enter owner: ");
+    file_size = os.path.getsize("./" + file_name)
+
+    message = {
+        "type": "copy",
+        "data": {
+            "file-name": file_name,
+            "file-size": file_size,
+            "owner": owner
+        }
+    }
+
+    print(f"Sending copy message to {manager_address[0]}:{manager_address[1]}")
+    print(f"   Message data: {json.dumps(message, indent=2)}")
+
+    manager_socket.sendto(json.dumps(message).encode(), manager_address);
+    response = json.loads(manager_socket.recvfrom(1024)[0].decode());
+
+    print(f"Received response from {manager_address[0]}:{manager_address[1]}")
+    print(f"   Response data: {json.dumps(response, indent=2)}")
+
+    if response['data']['status'] == 'success':
+        print(f"✅ Manager has accepted the copy request \n");
+        send_copy_to_disks(response['data']['response-data'], file_name)
+        return;
+    
+    if response['data']['status'] == 'failure':
+        print(f"❌ Error Copying File: {response['message']} \n");
+        sys.exit(1);
+
+# ---------------------------------------------------------------
+
+# AF_INET is the address family for IPv4
+# SOCK_DGRAM is the socket type for UDP
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as manager_socket:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as disk_socket:
+
+    # ------ start socket and register the user with manager ---------------------
+        # Bind the socket to the IP and port provided
+        manager_socket.bind((ip, m_port));
+        disk_socket.bind((ip, c_port));
+        print(f"User {name} started on {ip}:{m_port} \n");
+
+        send_register_user()
+    # ---------------------------------------------------------------
+
+    # ------ start commands loop ---------------------
+        while True:
+            try:
+                print ("Commands: \n"
+                    "1. configure-dss \n"
+                    "2. deregister-user and exit \n"
+                    "3. copy file to dss \n"
+                    "4. exit \n"
+                )
+                command = input("Enter command: ");
+
+                match command:
+                    case "1":
+                        send_configure_dss()
+                    case "2":
+                        send_deregister_user()
+                    case "3":
+                        send_copy_file_to_dss()
+                    case "4":
+                        sys.exit(0)
+                    case _:
+                        print("Invalid command \n");
+    
+            except KeyboardInterrupt:
+                print("\nCtrl+C pressed, shutting down...")
+                break;

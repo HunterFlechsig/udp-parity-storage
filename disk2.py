@@ -21,51 +21,67 @@ class DiskProcess:
         self.manager_address = manager_address
         self.running = True
         self.registered = False
+        self.manager_socket = None
+        self.command_socket = None
 
         # thread safe data structures
         self.lock = threading.Lock()
 
     def handle_manager_port(self):
         """Handle manager port (m_port)"""
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.bind((self.ip, self.m_port))
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as self.manager_socket:
+            try:
+                self.manager_socket.bind((self.ip, self.m_port))
+            except Exception as e:
+                print(f"❌ Error binding manager port: {e}")
+                self.running = False
+                return
+
             print(f"✅ Manager port {self.m_port} listening on {self.ip}")
 
             while self.running:
                 try:
-                    s.settimeout(1.0) # allow checking self.running
-                    data, addr = s.recvfrom(1024)
+                    self.manager_socket.settimeout(1.0) # allow checking self.running
+                    data, addr = self.manager_socket.recvfrom(1024)
                     message = json.loads(data.decode())
-                    print("--------------------------------")
+                    print ("=" * 60)
                     print(f"Manager port received from {addr[0]}:{addr[1]}")
                     print(f"   Message: {json.dumps(message, indent=2)}")
 
                     # process manager messages
-                    self.process_manager_message(message, addr, s)
+                    self.process_manager_message(message)
+                    print("=" * 60)
                 
                 except socket.timeout:
                     continue
                 except Exception as e:
                     if self.running:
                         print(f"❌ Manager port error: {e}")
+        
     
     def handle_command_port(self):
         """Handle command port (c_port)"""
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.bind((self.ip, self.c_port))
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as self.command_socket:
+            try:
+                self.command_socket.bind((self.ip, self.c_port))
+            except Exception as e:
+                print(f"❌ Error binding client port: {e}")
+                self.running = False
+                return
+
             print(f"✅ Client port {self.c_port} listening on {self.ip}")
 
             while self.running:
                 try:
-                    s.settimeout(1.0) # allow checking self.running
-                    data, addr = s.recvfrom(1024)
+                    self.command_socket.settimeout(1.0) # allow checking self.running
+                    data, addr = self.command_socket.recvfrom(1024)
                     message = json.loads(data.decode())
                     print("--------------------------------")
                     print(f"Client port received from {addr[0]}:{addr[1]}")
                     print(f"   Message: {json.dumps(message, indent=2)}")
                     
                     # process client messages
-                    self.process_command_message(message, addr, s)
+                    self.process_command_message(message)
                 
                 except socket.timeout:
                     continue
@@ -75,17 +91,17 @@ class DiskProcess:
 
     # ---------------------------------------------------------------
     
-    def process_manager_message(self, message, addr, socket):
+    def process_manager_message(self, message):
         """Process messages received on manager port"""
         print(f"Manager response: {message.get('data', {}).get('status', 'No status')}")
-        print(f"Manager response: {message.get('data', {}).get('message', 'No message')}")
+        print(f"{message.get('data', {}).get('message', 'No message')}")
         try:
             if message.get('type') == 'register-disk-response':
                 if message.get('data', {}).get('status', 'No status') == 'success':
                     with self.lock:
                         self.registered = True
-                else:
-                    sys.exit(1)
+                else: 
+                    self.running = False
             elif message.get('type') == 'deregister-disk-response':
                 if message.get('data', {}).get('status', 'No status') == 'success':
                     with self.lock:
@@ -105,7 +121,7 @@ class DiskProcess:
             print(f"Error processing manager message: {e}")
 
     
-    def process_command_message(self, message, addr, socket):
+    def process_command_message(self, message):
         """Process messages received on command port"""
         try:
             print(f"Processing client message: {message.get('type', 'Unknown type')}")
@@ -118,13 +134,11 @@ class DiskProcess:
 
     def send_to_manager(self, message):
         """Send message to manager and return response"""
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.sendto(json.dumps(message).encode(), self.manager_address)
+        self.manager_socket.sendto(json.dumps(message).encode(), self.manager_address)
 
     def send_to_command(self, message):
         """Send message to command and return response"""
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.sendto(json.dumps(message).encode(), self.command_address)
+        self.command_socket.sendto(json.dumps(message).encode(), self.command_address)
 
     # ---------------------------------------------------------------
 
@@ -140,8 +154,10 @@ class DiskProcess:
             }
         }
         self.send_to_manager(message)
+        print("=" * 60)
         print(f"Register disk message sent to manager address {self.manager_address[0]}:{self.manager_address[1]}")
         print(f"   Message: {json.dumps(message, indent=2)}")
+        print("=" * 60)
 
     def send_deregister_disk(self):
         """Send deregister disk message to manager"""
@@ -177,11 +193,12 @@ class DiskProcess:
         time.sleep(0.5)
         
         # Register with manager
-        self.send_register_disk()
+        if self.running:
+            self.send_register_disk()
         
         # Main command loop
         try:
-            while True:
+            while self.running:
                 if self.registered:
                     print("\n" + "=" * 40)
                     print("Commands:")
@@ -206,7 +223,7 @@ class DiskProcess:
         finally:
             print("🛑 Shutting down disk process...")
             self.running = False
-            print("✅ Shutdown complete")
+            print("✅ Shutdown complete")    
 
 
 def main():
@@ -275,6 +292,7 @@ def main():
     # Create and start disk process
     disk = DiskProcess(name, ip, m_port, c_port, manager_address)
     disk.start()
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()

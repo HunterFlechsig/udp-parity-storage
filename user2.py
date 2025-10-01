@@ -3,6 +3,7 @@
 # Approach #1: Separate Threads for Each Port
 # User process uses separate threads to manage manager (m) and client (c) ports
 
+from mimetypes import common_types
 import socket
 import json
 import threading
@@ -20,27 +21,35 @@ class UserProcess:
         self.manager_address = manager_address
         self.running = True
         self.registered = False
+        self.manager_socket = None
+        self.command_socket = None
+
 
         # thread safe data structures
         self.lock = threading.Lock()
+        self.waiting_for_response = False
 
     def handle_manager_port(self):
         """Handle manager port (m_port)"""
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.bind((self.ip, self.m_port))
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as self.manager_socket:
+            self.manager_socket.bind((self.ip, self.m_port))
             print(f"✅ Manager port {self.m_port} listening on {self.ip}")
 
             while self.running:
                 try:
-                    s.settimeout(1.0) # allow checking self.running
-                    data, addr = s.recvfrom(1024)
+                    self.manager_socket.settimeout(1.0) # allow checking self.running
+                    data, addr = self.manager_socket.recvfrom(1024)
                     message = json.loads(data.decode())
                     print("--------------------------------")
                     print(f"Manager port received from {addr[0]}:{addr[1]}")
                     print(f"   Message: {json.dumps(message, indent=2)}")
 
+                    with self.lock:
+                        self.waiting_for_response = False
+
                     # process manager messages
-                    self.process_manager_message(message, addr, s)
+                    self.process_manager_message(message)
+
                 
                 except socket.timeout:
                     continue
@@ -50,22 +59,31 @@ class UserProcess:
     
     def handle_command_port(self):
         """Handle command port (c_port)"""
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.bind((self.ip, self.c_port))
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as self.command_socket:
+            try:
+                self.command_socket.bind((self.ip, self.c_port))
+            except Exception as e:
+                print(f"❌ Error binding client port: {e}")
+                self.running = False
+                return
+
             print(f"✅ Client port {self.c_port} listening on {self.ip}")
 
             while self.running:
                 try:
-                    s.settimeout(1.0) # allow checking self.running
-                    data, addr = s.recvfrom(1024)
+                    self.command_socket.settimeout(1.0) # allow checking self.running
+                    data, addr = self.command_socket.recvfrom(1024)
                     message = json.loads(data.decode())
                     print("--------------------------------")
                     print(f"Client port received from {addr[0]}:{addr[1]}")
                     print(f"   Message: {json.dumps(message, indent=2)}")
                     
+                    with self.lock:
+                        self.waiting_for_response = False
+
                     # process client messages
-                    self.process_command_message(message, addr, s)
-                
+                    self.process_command_message(message)
+
                 except socket.timeout:
                     continue
                 except Exception as e:
@@ -74,37 +92,35 @@ class UserProcess:
 
     # ---------------------------------------------------------------
     
-    def process_manager_message(self, message, addr, socket):
+    def process_manager_message(self, message):
         """Process messages received on manager port"""
         print(f"Manager response: {message.get('data', {}).get('status', 'No status')}")
-        print(f"Manager response: {message.get('data', {}).get('message', 'No message')}")
+        print(f"{message.get('data', {}).get('message', 'No message')}")
         try:
-            if message.get('type') == 'register-user-response':
+            if message.get('type') == 'register-user':
                 if message.get('data', {}).get('status', 'No status') == 'success':
                     with self.lock:
                         self.registered = True
                 else:
-                    sys.exit(1)
-            elif message.get('type') == 'deregister-user-response':
+                    self.running = False
+            elif message.get('type') == 'deregister-user':
                 if message.get('data', {}).get('status', 'No status') == 'success':
                     with self.lock:
                         self.registered = False
-                        sys.exit(0)
                 else:
                     print(f"❌ Error Deregistering User: {message.get('data', {}).get('message', 'No message')}")
-            elif message.get('type') == 'copy-response':
-                self.handle_copy_response(message)
+            elif message.get('type') == 'copy':
+                self.handle_copy(message)
+            elif message.get('type') == 'configure-dss':
+                return
             else:
                 print(f"Processing manager message: {message.get('type', 'Unknown type')}")
-
-            if self.registered:
-                print("Enter command: ", end="", flush=True)
 
         except Exception as e:
             print(f"Error processing manager message: {e}")
 
     
-    def process_command_message(self, message, addr, socket):
+    def process_command_message(self, message):
         """Process messages received on command port"""
         try:
             print(f"Processing client message: {message.get('type', 'Unknown type')}")
@@ -117,13 +133,11 @@ class UserProcess:
 
     def send_to_manager(self, message):
         """Send message to manager and return response"""
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.sendto(json.dumps(message).encode(), self.manager_address)
+        self.manager_socket.sendto(json.dumps(message).encode(), self.manager_address)
 
     def send_to_command(self, message):
         """Send message to command and return response"""
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.sendto(json.dumps(message).encode(), self.command_address)
+        self.command_socket.sendto(json.dumps(message).encode(), self.command_address)
 
     # ---------------------------------------------------------------
 
@@ -170,6 +184,9 @@ class UserProcess:
 
     # ---------------------------------------------------------------
 
+
+    # ---------------------------------------------------------------
+
     def start(self):
         """Start the user process"""
 
@@ -190,19 +207,26 @@ class UserProcess:
 
         # Give threads time to start
         time.sleep(0.5)
-        
+
+        print("=" * 60)
+
         # Register with manager
-        self.send_register_user()
+        if self.running:
+            self.send_register_user()
+        else:
+            return
         
         # Main command loop
         try:
-            while True:
-                if self.registered:
+            while self.running:
+                if self.registered and not self.waiting_for_response:
+                    """Print commands"""
                     print("\n" + "=" * 40)
                     print("Commands:")
                     print("1. configure-dss")
                     print("2. deregister-user and exit")
                     print("3. exit")
+                    print("4. reprint commands")
                     print("=" * 40)
                     
                     command = input("Enter command: ").strip()
@@ -213,8 +237,12 @@ class UserProcess:
                         self.send_deregister_user()
                     elif command == "3":
                         break
+                    elif command == "4":
+                        continue
                     else:
                         print("❌ Invalid command")
+                    self.waiting_for_response = True
+
                     
         except KeyboardInterrupt:
             print("\n Ctrl+C pressed, shutting down...")

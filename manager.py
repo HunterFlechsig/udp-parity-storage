@@ -8,8 +8,7 @@ class ManagerProcess:
     def __init__(self, ip, port):
         self.ip = ip
         self.port = port
-        self.copying = False
-        self.copying_data = {}
+        self.blocked = False
 
         self.user_data = {}
         self.disk_data = {}
@@ -24,7 +23,7 @@ class ManagerProcess:
         print(f"Starting manager process on {self.ip}:{self.port}")
         print(f"Listening on {self.ip}:{self.port}")
         print(f"Port range: 31500-31999")
-        print("=" * 50)
+        print("=" * 20)
 
         # Bind the socket to the IP and port provided
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as self.s:
@@ -39,7 +38,6 @@ class ManagerProcess:
                         data, addr = self.s.recvfrom(1024)
                         message = json.loads(data.decode())
                         print(f"Manager received from {addr[0]}:{addr[1]}")
-                        print(f"   Message: {json.dumps(message, indent=2)}")
                         
                         # Process manager messages
                         if data:
@@ -57,7 +55,7 @@ class ManagerProcess:
         """Process messages received"""
         print(f"Processing message of type {message.get('type', 'Unknown type')}")
         try:
-            if self.copying and message.get('type') != 'copy-complete':
+            if self.blocked and message.get('type') != 'copy-complete':
                 self.send_response(message.get('type'), "Copying in progress", addr, "failure")
                 return
 
@@ -87,18 +85,17 @@ class ManagerProcess:
 
     def copy_complete(self, message, addr):
         """Copy complete"""
-        self.copying = False
+        self.blocked = False
 
-        dss_data = self.dss_data.get(self.copying_data.get('dss-name'))
-        dss_data['files'][self.copying_data.get('file-name')] = self.copying_data
-        self.send_response("copy-complete", "Copy complete", addr, "success")
+
+        # dss_data = self.dss_data.get(self.copying_data.get('dss-name'))
+        # dss_data['files'][self.copying_data.get('file-name')] = self.copying_data
+        # self.send_response("copy-complete", "Copy complete", addr, "success")
         return
 
     def configure_dss(self, message, addr):
         """Configure a DSS"""
         try:
-            print(f"Processing configure-dss message")
-
             # check if DSS already exists
             if message.get('data', {}).get('dss-name') in self.dss_data:
                 print(f"❌ DSS already exists: {message.get('data', {}).get('dss-name')}")
@@ -136,8 +133,8 @@ class ManagerProcess:
             self.dss_data[message.get('data').get('dss-name')] = {
                 "disks": [],
                 "files": {},
-                "striping-unit": message.get('data').get('striping-unit'),
-                "n": message.get('data').get('n')
+                "striping-unit": striping_unit,
+                "n": n
             }
             
             # pop n disks from the free disks
@@ -157,8 +154,6 @@ class ManagerProcess:
     def register_user(self, message, addr):
         """Register a user"""
         try:
-            print(f"Processing register-user message")
-
             # check if user already exists
             if message.get('data', {}).get('user-name') in self.user_data:
                 print(f"❌ User already exists: {message.get('data', {}).get('user-name')}")
@@ -189,7 +184,6 @@ class ManagerProcess:
         """Deregister a user"""
         try:
             user_name = message.get('data', {}).get('user-name')
-            print(f"Processing deregister-user message")
 
             if user_name not in self.user_data:
                 print(f"❌ User {user_name} not found")
@@ -212,7 +206,6 @@ class ManagerProcess:
 
     def register_disk(self, message, addr):
         """Register a disk"""
-        print(f"Processing register-disk message")
         try:
             # check if disk already exists
             if message.get('data', {}).get('disk-name') in self.disk_data:
@@ -245,7 +238,6 @@ class ManagerProcess:
     def deregister_disk(self, message, addr):
         """Deregister a disk"""
         try:
-            print(f"Processing deregister-disk message")
             
             disk_name = message.get('data', {}).get('disk-name')
             if disk_name not in self.disk_data:
@@ -268,7 +260,6 @@ class ManagerProcess:
     def copy(self, message, addr):
         """Copy a file to the DSS"""
         try:
-            print(f"Processing copy message")
 
             # choose dss
             if len(self.dss_data) == 0:
@@ -285,22 +276,17 @@ class ManagerProcess:
                 "striping-unit": dss_data.get('striping-unit'),
                 "disks": [
                     {
-                        "name": self.disk_data[disk_name].get("name") or self.disk_data[disk_name].get("disk-name"),
-                        "ip": self.disk_data[disk_name].get("ip"),
+                        "disk-name": self.disk_data[disk_name].get("disk-name"),
+                        "Ipv4": self.disk_data[disk_name].get("Ipv4"),
                         "c-port": self.disk_data[disk_name].get("c-port")
                     }
                     for disk_name in dss_data.get('disks', [])
                 ],
-                "file-name" : message.get('data', {}).get('file-name'),
-                "file-size" : message.get('data', {}).get('file-size'),
-                "owner" : message.get('data', {}).get('owner')
-            }
-            self.send_response("copy", "DSS chosen", addr, "success", res_data)
-            self.copying = True
-            self.copying_data = {
-                "dss-name": dss_name,
                 **message.get('data', {})
             }
+            self.send_response("copy", "DSS chosen", addr, "success", res_data)
+            self.blocked = True
+
         except Exception as e:
             print(f"❌ Error copying file: {e}")
             self.send_response("copy", "Error copying file: " + str(e), addr, "failure")
@@ -317,7 +303,8 @@ class ManagerProcess:
             }
         }
         print(f"Sending response to {addr[0]}:{addr[1]}")
-        print(f"   Response: {json.dumps(response, indent=2)}")
+        #print(f"   Response: {json.dumps(response, indent=2)}")
+        print("=" * 20)
         self.s.sendto(json.dumps(response).encode(), addr)
 
 

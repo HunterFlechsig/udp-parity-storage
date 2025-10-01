@@ -39,7 +39,6 @@ class DiskProcess:
                     data, addr = self.manager_socket.recvfrom(1024)
                     message = json.loads(data.decode())
 
-                    print("=" * 20)
                     print(f"Manager port received from {addr[0]}:{addr[1]}")
                     print(f"   Message: {json.dumps(message, indent=2)}")
 
@@ -90,7 +89,7 @@ class DiskProcess:
         """Process messages received on manager port"""
         try:
             match message.get('type'):
-                case 'register-disk-response':
+                case 'register-disk':
                     if message.get('data', {}).get('status', 'No status') == 'success':
                         self.registered = True
                         print(f"✅ Disk {self.name} registered successfully")
@@ -99,7 +98,7 @@ class DiskProcess:
                         print(f"message: {message.get('data', {}).get('message', 'No message')}")
                         sys.exit(1)
 
-                case 'deregister-disk-response':
+                case 'deregister-disk':
                     if message.get('data', {}).get('status', 'No status') == 'success':
                         self.running = False
                         self.registered = False
@@ -119,7 +118,6 @@ class DiskProcess:
                 case _:
                     print(f"Unknown manager message: {message.get('type', 'Unknown type')}")
                     return
-
         except Exception as e:
             print(f"Error processing manager message: {e}")
 
@@ -184,6 +182,7 @@ class DiskProcess:
 
                 threads = []
                 for disk_inx, chunck in enumerate(chunks):
+                    print(f"Copying to disk {disks[disk_inx]['disk-name']}")
                     t = threading.Thread(target=self.copy_to_disk_worker, args=(disks[disk_inx], chunck, file_name, (disk_inx == n%i), i))
                     t.start()
                     threads.append(t)
@@ -201,10 +200,16 @@ class DiskProcess:
 
     def send_to_manager(self, message):
         """Send message to manager and return response"""
+        print(f"Sending message.{message.get('type')} to manager address {self.manager_address[0]}:{self.manager_address[1]}")
+        print("=" * 20)
+
         self.manager_socket.sendto(json.dumps(message).encode(), self.manager_address)
 
     def send_with_command_port(self, message, address):
         """Send message to command and return response"""
+        print(f"Sending message.{message.get('type')} to command address {self.command_address[0]}:{self.command_address[1]}")
+        print("=" * 20)
+
         self.command_socket.sendto(json.dumps(message).encode(), address)
 
     # ---------------------------------------------------------------
@@ -221,10 +226,6 @@ class DiskProcess:
             }
         }
         self.send_to_manager(message)
-        print("=" * 60)
-        print(f"Register disk message sent to manager address {self.manager_address[0]}:{self.manager_address[1]}")
-        print(f"   Message: {json.dumps(message, indent=2)}")
-        print("=" * 60)
 
     def send_deregister_disk(self):
         """Send deregister disk message to manager"""
@@ -250,7 +251,6 @@ class DiskProcess:
         print(f"Manager port: {self.ip}:{self.m_port}")
         print(f"Client port: {self.ip}:{self.c_port}")
         print(f"Manager address: {self.manager_address[0]}:{self.manager_address[1]}")
-        print("--------------------------------")
 
         # Create separate threads for each port
         manager_thread = threading.Thread(target=self.handle_manager_port, daemon=True)
@@ -262,6 +262,8 @@ class DiskProcess:
 
         # Give threads time to start
         time.sleep(0.5)
+
+        print("=" * 20)
 
         # Register with manager
         if self.running:

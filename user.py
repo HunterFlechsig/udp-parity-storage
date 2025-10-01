@@ -10,6 +10,8 @@ import time
 import getopt
 import sys
 import os
+import base64
+import math
 
 class UserProcess:
     def __init__(self, name, ip, m_port, c_port, manager_address):
@@ -29,8 +31,12 @@ class UserProcess:
     def handle_manager_port(self):
         """Handle manager port (m_port)"""
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as self.manager_socket:
-            self.manager_socket.bind((self.ip, self.m_port))
-            print(f"✅ Manager port {self.m_port} listening on {self.ip}")
+            try:
+                self.manager_socket.bind((self.ip, self.m_port))
+            except Exception as e:
+                print(f"❌ Error binding manager port: {e}")
+                self.running = False
+                os._exit(1)
 
             while self.running:
                 try:
@@ -38,14 +44,12 @@ class UserProcess:
                     data, addr = self.manager_socket.recvfrom(1024)
                     message = json.loads(data.decode())
 
-                    print("=" * 20)
-                    print(f"Manager port received from {addr[0]}:{addr[1]}")
-                    print(f"   Message: {json.dumps(message, indent=2)}")
+                    print(f"Manager port received message from {addr[0]}:{addr[1]}")
 
                     # process manager messages
                     self.process_manager_message(message)
 
-                    print("=" * 20)
+                    print("=" * 20, "\n")
                 
                 except socket.timeout:
                     continue
@@ -61,9 +65,7 @@ class UserProcess:
             except Exception as e:
                 print(f"❌ Error binding client port: {e}")
                 self.running = False
-                return
-
-            print(f"✅ Client port {self.c_port} listening on {self.ip}")
+                os._exit(1)
 
             while self.running:
                 try:
@@ -87,31 +89,38 @@ class UserProcess:
     
     def process_manager_message(self, message):
         """Process messages received on manager port"""
-        print(f"Manager response: {message.get('data', {}).get('status', 'No status')}")
-        print(f"{message.get('data', {}).get('message', 'No message')}")
+        print(f"Process Manager response of type {message.get('type', 'Unknown type')}")
         try:
             match message.get('type'):
                 case 'register-user':
 
                     if message.get('data', {}).get('status', 'No status') == 'success':
                             self.registered = True
+                            print("✅ Registration successful!")
                     else:
                             self.running = False
-                            sys.exit(1)
+                            print(f"❌ Error Registering User: {message.get('data', {}).get('message', 'No message')}")
+                            os._exit(1)
 
                 case 'deregister-user':
 
                     if message.get('data', {}).get('status', 'No status') == 'success':
+                        print("✅ Deregistration successful! Exiting...")
                         self.running = False
                         self.registered = False
-                        sys.exit(0)
+                        os._exit(0)
+                    else:
+                        print(f"❌ Error Deregistering User: {message.get('data', {}).get('message', 'No message')}")
 
 
                 case 'copy':
                     self.handle_copy(message)
 
                 case 'configure-dss':
-                    return
+                    if message.get('data', {}).get('status', 'No status') == 'success':
+                        print("✅ Configure DSS successful!")
+                    else:
+                        print(f"❌ Error Configuring DSS: {message.get('data', {}).get('message', 'No message')}")
                 
                 case _:
                     print(f"Unknown manager message: {message.get('type', 'Unknown type')}")
@@ -132,9 +141,68 @@ class UserProcess:
     
     # ------------------- Response handlers ------------------------------
 
+
+    def calculate_parity_chunk(self, chunks):
+        """Calculate parity chunk"""        
+        # Initialize with the first chunk
+        parity_chunk = chunks[0]
+        
+        # XOR with each subsequent chunk
+        for chunk in chunks[1:]:
+            parity_chunk = bytes(a ^ b for a, b in zip(parity_chunk, chunk))
+        
+        return parity_chunk
+
+    def copy_to_disk_worker(self, disk, chunk, file_name, parity, stripe_number):
+        """Copy to disk worker"""
+        block = base64.b64encode(chunk).decode("utf-8")
+        message = {
+            "type": "copy",
+            "data": {
+                "block": block,
+                "block-type": "data" if not parity else "parity",
+                "file-name": file_name,
+                "stripe-number": stripe_number
+            }
+        }
+        self.send_with_command_port(message, (disk['Ipv4'], disk['c-port']))
+
     def handle_copy(self, message):
         """Handle copy message"""
-        # TODO: Implement copy message handling
+        data = message.get('data', {}).get('data', {})
+        print(f"Copying data to dss: {data.get('dss-name')}")
+        file_name = data.get('file-name')
+        file_size = data.get('file-size')
+        owner = data.get('owner')
+        n = data.get('n')
+        striping_unit = data.get('striping-unit')
+        disks = data.get('disks')
+
+        num_stripes = math.ceil(file_size / ((n-1) * striping_unit))
+
+        with open(file_name, "rb") as f:
+            for i in range(num_stripes):
+                chunks = []
+                for _ in range(n-1):
+                    chunk = f.read(striping_unit)
+
+                    # pad with nulls if not enough bytes
+                    if len(chunk) < striping_unit:
+                        chunk = chunk.ljust(striping_unit, b"\x00")
+                    chunks.append(chunk)
+
+                parity_chunk = self.calculate_parity_chunk(chunks)
+                chunks.insert(i % n, parity_chunk)
+
+                threads = []
+                for disk_inx, chunck in enumerate(chunks):
+                    print(f"Copying to disk {disks[disk_inx]['disk-name']}")
+                    t = threading.Thread(target=self.copy_to_disk_worker, args=(disks[disk_inx], chunck, file_name, (disk_inx == i%n), i))
+                    t.start()
+                    threads.append(t)
+
+                for t in threads:
+                    t.join()
 
         message = {
             "type": "copy-complete",
@@ -142,15 +210,20 @@ class UserProcess:
         }
         self.send_to_manager(message)
 
+
     # ---------------------------------------------------------------
 
     def send_to_manager(self, message):
         """Send message to manager and return response"""
+        print(f"Sending {message.get('type')} message to manager address {self.manager_address[0]}:{self.manager_address[1]}")
+        
         self.manager_socket.sendto(json.dumps(message).encode(), self.manager_address)
 
-    def send_to_command(self, message):
+    def send_with_command_port(self, message, addr):
         """Send message to command and return response"""
-        self.command_socket.sendto(json.dumps(message).encode(), self.command_address)
+        print(f"Sending {message.get('type')} message to command address {addr[0]}:{addr[1]}")
+        
+        self.command_socket.sendto(json.dumps(message).encode(), addr)
 
     # ---------------------------------------------------------------
 
@@ -166,8 +239,6 @@ class UserProcess:
             }
         }
         self.send_to_manager(message)
-        print(f"Register user message sent to manager address {self.manager_address[0]}:{self.manager_address[1]}")
-        print(f"   Message: {json.dumps(message, indent=2)}")
 
     def send_deregister_user(self):
         """Send deregister user message to manager"""
@@ -184,6 +255,7 @@ class UserProcess:
         dss_name = input("Enter DSS name: ")
         n = input("Enter number of disks: ")
         striping_unit = input("Enter striping unit: ")
+        print("\n")
         
         message = {
             "type": "configure-dss",
@@ -198,15 +270,15 @@ class UserProcess:
     def send_copy_file_to_dss(self):
         """Send copy file to dss message to manager"""
         file_name = input("Enter file name: ")
-        owner = input("Enter owner: ")
         file_size = os.path.getsize("./" + file_name)
+        print(f"\n")
         
         message = {
             "type": "copy",
             "data": {
                 "file-name": file_name,
                 "file-size": file_size,
-                "owner": owner
+                "owner": self.name
             }
         }
         self.send_to_manager(message)
@@ -224,7 +296,6 @@ class UserProcess:
         print(f"Manager port: {self.ip}:{self.m_port}")
         print(f"Client port: {self.ip}:{self.c_port}")
         print(f"Manager address: {self.manager_address[0]}:{self.manager_address[1]}")
-        print("--------------------------------")
 
         # Create separate threads for each port
         manager_thread = threading.Thread(target=self.handle_manager_port, daemon=True)
@@ -237,10 +308,12 @@ class UserProcess:
         # Give threads time to start
         time.sleep(0.5)
 
-        print("=" * 60)
+        print("=" * 20, "\n")
 
         # Register with manager
         if self.running:
+            self.send_to_manager({'type': 'copy-complete'})
+            time.sleep(0.5)
             self.send_register_user()
         else:
             return
@@ -255,16 +328,24 @@ class UserProcess:
                     continue
 
                 """Print commands"""
-                print("\n" + "=" * 40)
+                print("=" * 20)
                 print("Commands:")
                 print("1. configure-dss")
                 print("2. deregister-user")
                 print("3. copy file to dss")
                 print("4. reprint commands")
                 print("5. exit")
-                print("=" * 40)
+                print("=" * 20)
                 
+                # Check if we're still running before waiting for input
+                # if not self.running:
+                #     break
+                    
                 command = input("Enter command: ").strip()
+                
+                # Check if we're still running after getting input
+                # if not self.running:
+                #     break
                     
                 if command == "1":
                     self.send_configure_dss()
@@ -276,10 +357,15 @@ class UserProcess:
                     continue
                 elif command == "5":
                     break
+                elif command == "6":
+                    self.send_to_manager({'type': 'copy-complete'})
                 else:
                     print("❌ Invalid command")
-        
+
+                time.sleep(0.5)
+
         except KeyboardInterrupt:
+            self.send_deregister_user()
             print("\n Ctrl+C pressed, shutting down...")
         finally:
             print("Shutting down user process...")

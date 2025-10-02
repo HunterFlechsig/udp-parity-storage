@@ -24,6 +24,8 @@ class DiskProcess:
         self.manager_socket = None
         self.command_socket = None
 
+        self.files = {}  # dictionary to store files and their data
+
         # thread safe data structures
         self.lock = threading.Lock()
 
@@ -43,7 +45,7 @@ class DiskProcess:
                     print(f"   Message: {json.dumps(message, indent=2)}")
 
                     # process manager messages
-                    self.process_manager_message(message)
+                    self.process_manager_message(message, addr)
 
                     print("=" * 20)
                 
@@ -72,10 +74,9 @@ class DiskProcess:
                     message = json.loads(data.decode())
                     print("--------------------------------")
                     print(f"Client port received from {addr[0]}:{addr[1]}")
-                    print(f"   Message: {json.dumps(message, indent=2)}")
-                    
+
                     # process client messages
-                    self.process_command_message(message)
+                    self.process_command_message(message, addr)
 
                 except socket.timeout:
                     continue
@@ -85,7 +86,7 @@ class DiskProcess:
 
     # ---------------------------------------------------------------
     
-    def process_manager_message(self, message):
+    def process_manager_message(self, message, addr):
         """Process messages received on manager port"""
         try:
             match message.get('type'):
@@ -106,14 +107,6 @@ class DiskProcess:
                         sys.exit(0)
                     else:
                         print(f"message: {message.get('data', {}).get('message', 'No message')}")
-
-                case 'copy':
-                    if message.get('data', {}).get('status', 'No status') == 'success':
-                        print(f"✅ Got copy data from manager")
-                        self.handle_copy(message)
-                    else:
-                        print(f"{message.get('data', {}).get('message', 'No message')}")
-                        sys.exit(1)
                 
                 case _:
                     print(f"Unknown manager message: {message.get('type', 'Unknown type')}")
@@ -122,23 +115,19 @@ class DiskProcess:
             print(f"Error processing manager message: {e}")
 
     
-    def process_command_message(self, message):
+    def process_command_message(self, message, addr):
         """Process messages received on command port"""
         try:
-            print(f"Processing client message: {message.get('type', 'Unknown type')}")
-            # add client-specific message handling here
+            match message.get('type'):
+                case 'copy':
+                    self.handle_copy(message, addr)
+                case _:
+                    print(f"Unknown command message: {message.get('type', 'Unknown type')}")
         except Exception as e:
             print(f"Error processing client message: {e}")
 
     
     # ------------------- Response handlers ------------------------------
-
-    def calculate_parity_chunk(self, chunks):
-        """Calculate parity chunk"""
-        parity_chunk = ""
-        for chunk in chunks:
-            parity_chunk ^= chunk
-        return parity_chunk
 
     def copy_to_disk_worker(self, disk, chunk, file_name, parity, stripe_number):
         """Copy to disk worker"""
@@ -155,46 +144,43 @@ class DiskProcess:
         self.send_with_command_port(message, (disk['ip'], disk['c-port']))
 
 
-    def handle_copy(self, message):
+    def handle_copy(self, message, addr):
         """Handle copy message"""
-        print(f"Copying data to dss: {message.get('data', {}).get('dss-name')}")
-        file_name = message.get('data', {}).get('file-name')
-        file_size = message.get('data', {}).get('file-size')
-        owner = message.get('data', {}).get('owner')
-        n = message.get('data', {}).get('n')
-        striping_unit = message.get('data', {}).get('striping-unit')
-        disks = message.get('data', {}).get('disks')
+        try: 
+            data = message.get('data', {})
+            file_name = data.get('file-name')
+            block_type = data.get('block-type')
+            stripe_number = data.get('stripe-number')
+            block_index = data.get('block-index')
+            block = data.get('block')
+            chunk = base64.b64decode(block.encode("utf-8"))
 
-        num_stripes = -(-file_size // -((n-1) * striping_unit))
+            if file_name not in self.files:
+                self.files[file_name] = {}
+            self.files[file_name][(stripe_number)] = (chunk, block_index, block_type)
+            print(f"✅ Stored block {block_index} of type {block_type} for file {file_name}, stripe {stripe_number}")
 
-        with open(file_name, "rb") as f:
-            for i in range(num_stripes):
-                chunks = []
-                for _ in range(n-1):
-                    chunk = f.read(striping_unit)
+            # Acknowledge receipt
+            ack_message = {
+                "type": "acknowledge",
+                "data": {
+                    "status": "success",
+                    "message": f"Block {block_index} of type {block_type} for file {file_name}, stripe {stripe_number} stored successfully"
+                }
+            }
+            print("files:", self.files)
+            self.send_with_command_port(ack_message, addr)
+        except Exception as e:
+            print(f"❌ Error handling copy message: {e}")
+            ack_message = {
+                "type": "acknowledge",
+                "data": {
+                    "status": "error",
+                    "message": f"Error storing block: {e}"
+                }
+            }
+            self.send_with_command_port(ack_message, addr)
 
-                    # pad with nulls if not enough bytes
-                    if len(chunk) < striping_unit:
-                        chunk = chunk.ljust(striping_unit, b"\x00")
-
-                parity_chunk = self.calculate_parity_chunk(chunks)
-                chunks.insert(n%i, parity_chunk)
-
-                threads = []
-                for disk_inx, chunck in enumerate(chunks):
-                    print(f"Copying to disk {disks[disk_inx]['disk-name']}")
-                    t = threading.Thread(target=self.copy_to_disk_worker, args=(disks[disk_inx], chunck, file_name, (disk_inx == n%i), i))
-                    t.start()
-                    threads.append(t)
-
-                for t in threads:
-                    t.join()
-
-        message = {
-            "type": "copy-complete",
-            "data": {}
-        }
-        self.send_to_manager(message)
 
     # ---------------------------------------------------------------
 
@@ -207,7 +193,7 @@ class DiskProcess:
 
     def send_with_command_port(self, message, address):
         """Send message to command and return response"""
-        print(f"Sending message.{message.get('type')} to command address {self.command_address[0]}:{self.command_address[1]}")
+        print(f"Sending message.{message.get('type')} to command address {address[0]}:{address[1]}")
         print("=" * 20)
 
         self.command_socket.sendto(json.dumps(message).encode(), address)

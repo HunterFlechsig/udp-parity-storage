@@ -153,7 +153,7 @@ class UserProcess:
         
         return parity_chunk
 
-    def copy_to_disk_worker(self, disk, chunk, file_name, parity, stripe_number):
+    def copy_to_disk_worker(self, disk, chunk, file_name, parity, stripe_number, block_index):
         """Copy to disk worker"""
         block = base64.b64encode(chunk).decode("utf-8")
         message = {
@@ -162,7 +162,8 @@ class UserProcess:
                 "block": block,
                 "block-type": "data" if not parity else "parity",
                 "file-name": file_name,
-                "stripe-number": stripe_number
+                "stripe-number": stripe_number,
+                "block-index": block_index
             }
         }
         self.send_with_command_port(message, (disk['Ipv4'], disk['c-port']))
@@ -197,7 +198,8 @@ class UserProcess:
                 threads = []
                 for disk_inx, chunck in enumerate(chunks):
                     print(f"Copying to disk {disks[disk_inx]['disk-name']}")
-                    t = threading.Thread(target=self.copy_to_disk_worker, args=(disks[disk_inx], chunck, file_name, (disk_inx == i%n), i))
+                    block_index = i*(n-1) + disk_inx
+                    t = threading.Thread(target=self.copy_to_disk_worker, args=(disks[disk_inx], chunck, file_name, (disk_inx == i%n), i, block_index))
                     t.start()
                     threads.append(t)
 

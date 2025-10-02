@@ -74,6 +74,8 @@ class ManagerProcess:
                     self.copy(message, addr)
                 case 'copy-complete':
                     self.copy_complete(message, addr)
+                case 'read':
+                    self.read(message, addr)
                 case _:
                     print(f"unknown message type")
                     self.send_response(message.get('type'), "Unknown message type", addr, "failure")
@@ -92,6 +94,9 @@ class ManagerProcess:
         # dss_data['files'][self.copying_data.get('file-name')] = self.copying_data
         # self.send_response("copy-complete", "Copy complete", addr, "success")
         return
+    
+    def read(self, message, addr):
+        print("Read not implemented yet")
 
     def configure_dss(self, message, addr):
         """Configure a DSS"""

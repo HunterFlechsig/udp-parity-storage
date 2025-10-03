@@ -1,3 +1,4 @@
+from doctest import debug
 import socket
 import json
 import getopt
@@ -9,11 +10,13 @@ class ManagerProcess:
         self.ip = ip
         self.port = port
         self.blocked = False
+        self.blocked_data = {}
 
         self.user_data = {}
         self.disk_data = {}
         self.free_disks = []
         self.dss_data = {}
+        self.file_data = {}
         self.used_ports = set()
 
         self.s = None
@@ -87,16 +90,56 @@ class ManagerProcess:
 
     def copy_complete(self, message, addr):
         """Copy complete"""
+
+        dss_data = self.dss_data.get(self.blocked_data.get('dss-name'))
+        dss_data.get('files')[self.blocked_data.get('file-data').get('file-name')] = self.blocked_data.get('file-data')
+
         self.blocked = False
-
-
-        # dss_data = self.dss_data.get(self.copying_data.get('dss-name'))
-        # dss_data['files'][self.copying_data.get('file-name')] = self.copying_data
-        # self.send_response("copy-complete", "Copy complete", addr, "success")
-        return
+        self.send_response("copy-complete", "Copy complete", addr, "success")
     
     def read(self, message, addr):
-        print("Read not implemented yet")
+        try:
+            data = message.get('data')
+            dss_name = data.get('dss-name')
+            file_name = data.get('file-name')
+            user_name = data.get('user-name')
+
+            if dss_name not in self.dss_data:
+                print(f"❌ DSS not found: {dss_name}")
+                self.send_response("read", "DSS not found", addr, "failure")
+                return
+
+            if file_name not in self.dss_data[dss_name]['files']:
+                print(f"❌ File not found: {file_name}")
+                self.send_response("read", "File not found", addr, "failure")
+                return
+
+            print(self.dss_data)
+            if user_name not in self.dss_data[dss_name]['files'][file_name]['owner']:
+                print(f"❌ User not found: {user_name}")
+                self.send_response("read", "User not owner of requested file", addr, "failure")
+                return
+
+            read_data = {
+                "file-name": file_name,
+                "file-size": self.dss_data[dss_name]['files'][file_name]['file-size'],
+                "dss-name": dss_name,
+                "n": self.dss_data[dss_name]['n'],
+                "striping-unit": self.dss_data[dss_name]['striping-unit'],
+                "disks": [
+                    {
+                        "disk-name": self.disk_data[disk_name].get("disk-name"),
+                        "Ipv4": self.disk_data[disk_name].get("Ipv4"),
+                        "c-port": self.disk_data[disk_name].get("c-port")
+                    }
+                    for disk_name in self.dss_data[dss_name].get('disks', [])
+                ],
+            }
+
+            self.send_response("read", "File found", addr, "success", read_data)
+        except Exception as e:
+            print(f"❌ Error reading file: {e}")
+            self.send_response("read", "Error reading file: " + str(e), addr, "failure")
 
     def configure_dss(self, message, addr):
         """Configure a DSS"""
@@ -249,6 +292,11 @@ class ManagerProcess:
                 print(f"❌ Disk {disk_name} not found")
                 self.send_response("deregister-disk", f"Disk {disk_name} not found", addr, "failure")
                 return
+
+            if disk_name not in self.free_disks:
+                print(f"❌ Disk {disk_name} not in free disks")
+                self.send_response("deregister-disk", f"Disk {disk_name} is being used in a DSS", addr, "failure")
+                return
             
             # remove disk data and track ports
             self.disk_data.pop(disk_name)
@@ -291,6 +339,8 @@ class ManagerProcess:
             }
             self.send_response("copy", "DSS chosen", addr, "success", res_data)
             self.blocked = True
+            self.blocked_data['file-data'] = message.get('data', {})
+            self.blocked_data['dss-name'] = dss_name
 
         except Exception as e:
             print(f"❌ Error copying file: {e}")

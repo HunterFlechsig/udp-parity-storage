@@ -12,6 +12,7 @@ import sys
 import os
 import base64
 import math
+import filecmp
 
 class UserProcess:
     def __init__(self, name, ip, m_port, c_port, manager_address):
@@ -26,6 +27,7 @@ class UserProcess:
         self.command_socket = None
 
         # thread safe data structures
+        self.read_buffer = {}
         self.lock = threading.Lock()
 
     def handle_manager_port(self):
@@ -70,7 +72,7 @@ class UserProcess:
             while self.running:
                 try:
                     self.command_socket.settimeout(1.0) # allow checking self.running
-                    data, addr = self.command_socket.recvfrom(1024)
+                    data, addr = self.command_socket.recvfrom(8192)
                     message = json.loads(data.decode())
                     print("--------------------------------")
                     print(f"Client port received from {addr[0]}:{addr[1]}")
@@ -116,6 +118,9 @@ class UserProcess:
                 case 'copy':
                     self.handle_copy(message)
 
+                case 'read':
+                    self.handle_read(message)
+
                 case 'configure-dss':
                     if message.get('data', {}).get('status', 'No status') == 'success':
                         print("✅ Configure DSS successful!")
@@ -133,13 +138,70 @@ class UserProcess:
     def process_command_message(self, message):
         """Process messages received on command port"""
         try:
-            print(f"Processing client message: {message.get('type', 'Unknown type')}")
-            # add client-specific message handling here
+            match message.get('type'):
+                case 'read':
+                    self.handle_read_command(message)
+                case 'read-complete':
+                    self.handle_read_complete(message)
+                case _:
+                    print(f"Unknown client message: {message.get('type', 'Unknown type')}")
         except Exception as e:
             print(f"Error processing client message: {e}")
 
     
     # ------------------- Response handlers ------------------------------
+
+    def handle_read_complete(self, message):
+        """Handle read complete message"""
+        data = message.get('data', {})
+        file_name = data.get('file-name')
+        print(f"Read complete for file {file_name}")
+        
+        # Collect all data first
+        all_data = b""
+        for stripe in self.read_buffer[file_name]:
+            for block in stripe:
+                for chunk in block:
+                    chunk_data, chunk_type = chunk['data'], chunk['type']
+                    if chunk_type == "data":
+                        all_data += chunk_data
+        
+        # Strip trailing null bytes
+        all_data = all_data.rstrip(b'\x00')
+        
+        # Write the cleaned data to file
+        with open(file_name + "_read", "wb") as f:
+            f.write(all_data)
+        
+        self.read_buffer[file_name] = []
+
+        res = filecmp.cmp(file_name, file_name + "_read")
+        if res:
+            print("Files are the same")
+        else:
+            print("Files are different")
+
+    def handle_read_command(self, message):
+        """Handle read message"""
+        data = message.get('data', {})
+        file_name = data.get('file-name')
+        stripe_number = data.get('stripe-number')
+        striping_unit = data.get('striping-unit')
+        stripe_count = data.get('stripe-count')
+        block_index = data.get('block-index')
+        n = data.get('n')
+        chunk_index = data.get('chunk-index')
+        chunk_count = data.get('chunk-count')
+        chunk = data.get('chunk')
+
+        # Initialize buffer if needed
+        if file_name not in self.read_buffer:            
+            self.read_buffer[file_name] = [[[None for _ in range(chunk_count)] for _ in range(n)] for _ in range(stripe_count)]
+
+        self.read_buffer[file_name][stripe_number][block_index % n][chunk_index] = {
+            'data': base64.b64decode(chunk),
+            'type': data.get('block-type', 'data'),
+        }
 
 
     def calculate_parity_chunk(self, chunks):
@@ -153,20 +215,30 @@ class UserProcess:
         
         return parity_chunk
 
-    def copy_to_disk_worker(self, disk, chunk, file_name, parity, stripe_number, block_index):
+    def copy_to_disk_worker(self, disk, chunk, file_name, parity, stripe_number, block_index, striping_unit, n):
         """Copy to disk worker"""
-        block = base64.b64encode(chunk).decode("utf-8")
-        message = {
-            "type": "copy",
-            "data": {
-                "block": block,
-                "block-type": "data" if not parity else "parity",
-                "file-name": file_name,
-                "stripe-number": stripe_number,
-                "block-index": block_index
+        chunk_size = 1024
+        total_chunks = (striping_unit + chunk_size - 1) // chunk_size
+
+        for i in range(total_chunks):
+            chunk_data= chunk[i:i+chunk_size]
+            encoded_chunk = base64.b64encode(chunk_data).decode()
+            message = {
+                "type": "copy",
+                "data": {
+                    "chunk": encoded_chunk,
+                    "chunk-index": i,
+                    "chunk-count": total_chunks,
+                    "block-type": "data" if not parity else "parity",
+                    "file-name": file_name,
+                    "stripe-number": stripe_number,
+                    "block-index": block_index,
+                    "n": n,
+                    "striping-unit": striping_unit
+                }
             }
-        }
-        self.send_with_command_port(message, (disk['Ipv4'], disk['c-port']))
+            self.send_with_command_port(message, (disk['Ipv4'], disk['c-port']))
+        
 
     def handle_copy(self, message):
         """Handle copy message"""
@@ -174,14 +246,15 @@ class UserProcess:
         print(f"Copying data to dss: {data.get('dss-name')}")
         file_name = data.get('file-name')
         file_size = data.get('file-size')
-        owner = data.get('owner')
         n = data.get('n')
         striping_unit = data.get('striping-unit')
         disks = data.get('disks')
 
         num_stripes = math.ceil(file_size / ((n-1) * striping_unit))
+        
 
         with open(file_name, "rb") as f:
+           
             for i in range(num_stripes):
                 chunks = []
                 for _ in range(n-1):
@@ -198,8 +271,8 @@ class UserProcess:
                 threads = []
                 for disk_inx, chunck in enumerate(chunks):
                     print(f"Copying to disk {disks[disk_inx]['disk-name']}")
-                    block_index = i*(n-1) + disk_inx
-                    t = threading.Thread(target=self.copy_to_disk_worker, args=(disks[disk_inx], chunck, file_name, (disk_inx == i%n), i, block_index))
+                    block_index = i*n + disk_inx
+                    t = threading.Thread(target=self.copy_to_disk_worker, args=(disks[disk_inx], chunck, file_name, (disk_inx == i%n), i, block_index, striping_unit, n))
                     t.start()
                     threads.append(t)
 
@@ -212,7 +285,51 @@ class UserProcess:
         }
         self.send_to_manager(message)
 
+    def read_disk_worker(self, disk, file_name, stripe_number, striping_unit):
+        """Read from disk worker with non-blocking select approach"""
+        try:
+            # Send read request
+            message = {
+                "type": "read",
+                "data": {
+                    "file-name": file_name,
+                    "stripe-number": stripe_number,
+                    "striping-unit": striping_unit,
+                }
+            }
+            self.send_with_command_port(message, (disk['Ipv4'], disk['c-port']))
+        
+        except Exception as e:
+            print(f"❌ Error reading from {disk['disk-name']} stripe {stripe_number}: {e}")
 
+
+    def handle_read(self, message):
+        """Handle read message"""
+        print(f"message: {message}")
+        data = message.get('data', {}).get('data', {})
+        print(f"Reading data from dss: {data.get('dss-name')}")
+        file_name = data.get('file-name')
+        file_size = data.get('file-size')
+        n = data.get('n')
+        striping_unit = data.get('striping-unit')
+        disks = data.get('disks')
+
+        num_stripes = math.ceil(file_size / ((n-1) * striping_unit))
+
+        # Open file once for writing
+        with open(file_name + "_read", "wb") as f:
+            for i in range(num_stripes):
+                threads = []
+                for disk_inx in range(len(disks)):
+                    print(f"Reading from disk {disks[disk_inx]['disk-name']}")
+                    t = threading.Thread(target=self.read_disk_worker, args=(disks[disk_inx], file_name, i, striping_unit))
+                    t.start()
+                    threads.append(t)
+
+                for t in threads:
+                    t.join()
+
+                # Write data for this stri
     # ---------------------------------------------------------------
 
     def send_to_manager(self, message):
@@ -271,7 +388,8 @@ class UserProcess:
     
     def send_copy_file_to_dss(self):
         """Send copy file to dss message to manager"""
-        file_name = input("Enter file name: ")
+        # file_name = input("Enter file name: ")
+        file_name = "a.txt"
         file_size = os.path.getsize("./" + file_name)
         print(f"\n")
         
@@ -281,6 +399,24 @@ class UserProcess:
                 "file-name": file_name,
                 "file-size": file_size,
                 "owner": self.name
+            }
+        }
+        self.send_to_manager(message)
+
+    def send_read_file_from_dss(self):
+        """Send read file from dss message to manager"""
+        # file_name = input("Enter file name: ")
+        file_name = "a.txt"
+        dss_name = "dss1"
+        # dss_name = input("Enter dss name: ")
+        print(f"\n")
+        
+        message = {
+            "type": "read",
+            "data": {
+                "file-name": file_name,
+                "dss-name": dss_name,
+                "user-name": self.name
             }
         }
         self.send_to_manager(message)
@@ -337,6 +473,7 @@ class UserProcess:
                 print("3. copy file to dss")
                 print("4. reprint commands")
                 print("5. exit")
+                print("6. read file from dss")
                 print("=" * 20)
                 
                 # Check if we're still running before waiting for input
@@ -360,7 +497,7 @@ class UserProcess:
                 elif command == "5":
                     break
                 elif command == "6":
-                    self.send_to_manager({'type': 'copy-complete'})
+                    self.send_read_file_from_dss()
                 else:
                     print("❌ Invalid command")
 

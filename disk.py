@@ -11,6 +11,7 @@ import time
 import getopt
 import sys
 import base64
+import random
 
 class DiskProcess:
     def __init__(self, name, ip, m_port, c_port, manager_address):
@@ -24,8 +25,9 @@ class DiskProcess:
         self.manager_socket = None
         self.command_socket = None
 
+        self.random_bit_flip = 30
+
         self.files = {}  # dictionary to store files and their data
-        self.copy_buffer = {}
 
         # thread safe data structures
         self.lock = threading.Lock()
@@ -42,13 +44,10 @@ class DiskProcess:
                     data, addr = self.manager_socket.recvfrom(8024)
                     message = json.loads(data.decode())
 
-                    print(f"Manager port received from {addr[0]}:{addr[1]}")
-                    print(f"   Message: {json.dumps(message, indent=2)}")
+                    print(f"📩 Manager port received message from {addr[0]}:{addr[1]} of type {message.get('type', 'Unknown type')}")
 
                     # process manager messages
                     self.process_manager_message(message, addr)
-
-                    print("=" * 20)
                 
                 except socket.timeout:
                     continue
@@ -73,8 +72,8 @@ class DiskProcess:
                     self.command_socket.settimeout(1.0) # allow checking self.running
                     data, addr = self.command_socket.recvfrom(8192)
                     message = json.loads(data.decode())
-                    print("--------------------------------")
-                    print(f"Client port received from {addr[0]}:{addr[1]}")
+
+                    print(f"📩 Command port received message from {addr[0]}:{addr[1]} of type {message.get('type', 'Unknown type')}")
 
                     # process client messages
                     self.process_command_message(message, addr)
@@ -133,20 +132,6 @@ class DiskProcess:
     
     # ------------------- Response handlers ------------------------------
 
-    def copy_to_disk_worker(self, disk, chunk, file_name, parity, stripe_number):
-        """Copy to disk worker"""
-        block = base64.b64encode(chunk).decode("utf-8")
-        message = {
-            "type": "copy",
-            "data": {
-                "block": block,
-                "block-type": "data" if not parity else "parity",
-                "file-name": file_name,
-                "stripe-number": stripe_number
-            }
-        }
-        self.send_with_command_port(message, (disk['ip'], disk['c-port']))
-
 
     def handle_copy(self, message, addr):
         """Handle copy message"""
@@ -154,52 +139,33 @@ class DiskProcess:
             data = message.get('data', {})
             file_name = data.get('file-name')
             block_type = data.get('block-type')
-            stripe_number = data.get('stripe-number')
+            stripe_index = data.get('stripe-index')
+            stripe_count = data.get('stripe-count')
             block_index = data.get('block-index')
-            n = data.get('n')
-            striping_unit = data.get('striping-unit')
             chunk = data.get('chunk')
             chunk_index = data.get('chunk-index')
             chunk_count = data.get('chunk-count')
+            n = data.get('n')
 
-            print(f"message: {message}")
 
             # Initialize as empty bytes if it doesn't exist
-            if file_name not in self.copy_buffer:
-                self.copy_buffer[file_name] = b""
+            if file_name not in self.files:
+                self.files[file_name] = {"data": [[None for _ in range(chunk_count)] for _ in range (stripe_count)], 
+                    'type': [None for _ in range (stripe_count)], 'block_index': [None for _ in range (stripe_count)], 'n': n }
 
-            # Decode the base64 chunk and concatenate as bytes
-            decoded_chunk = base64.b64decode(chunk)
-            self.copy_buffer[file_name] += decoded_chunk
+            # Store chunk and metadata for this stripe
+            self.files[file_name]['data'][stripe_index][chunk_index] = chunk
+            self.files[file_name]['type'][stripe_index] = block_type
+            self.files[file_name]['block_index'][stripe_index] = block_index
 
-            print(f"copy_buffer size: {len(self.copy_buffer[file_name])} bytes")
-
-            if chunk_index == chunk_count - 1:
-                if file_name not in self.files:
-                    self.files[file_name] = {"stripes": {}}
-                self.files[file_name]["stripes"][stripe_number] = (self.copy_buffer[file_name], block_index, block_type)
-                self.files[file_name]['n'] = n
-                self.files[file_name]['striping-unit'] = striping_unit
-                self.files[file_name]['stripe-count'] = stripe_number+1
-                print(f"✅ Stored block {block_index} of type {block_type} for file {file_name}, stripe {stripe_number}, size={len(self.copy_buffer[file_name])} bytes")
-                self.copy_buffer[file_name] = b""
-            # Acknowledge receipt
-                ack_message = {
-                    "type": "copy-complete",
-                    "data": {
-                        "status": "success",
-                        "message": f"Block {block_index} of type {block_type} for file {file_name}, stripe {stripe_number} stored successfully"
-                    }
-                }
-                self.send_with_command_port(ack_message, addr)
-                print("files:", self.files)
-                return
+            print(f"Storing block {block_index} of type {block_type} for file {file_name}, stripe {stripe_index}")
 
             ack_message = {
-                "type": "acknowledge",
+                "type": "copy-ack",
                 "data": {
                     "status": "success",
-                    "message": f"Block {block_index} of type {block_type} for file {file_name}, stripe {stripe_number} stored successfully"
+                    "message": f"✅ Block {block_index} of type {block_type} for file {file_name}, stripe {stripe_index} stored successfully"
+
                 }
             }
             self.send_with_command_port(ack_message, addr)
@@ -210,7 +176,7 @@ class DiskProcess:
                 "type": "acknowledge",
                 "data": {
                     "status": "error",
-                    "message": f"Error storing block: {e}"
+                    "message": f"❌ Error storing block: {e}"
                 }
             }
             self.send_with_command_port(ack_message, addr)
@@ -223,21 +189,43 @@ class DiskProcess:
             file_name = data.get('file-name')
             stripe_number = data.get('stripe-number')
 
-            striping_unit = self.files[file_name]['striping-unit']
-            n = self.files[file_name]['n']
-            stripe_count = self.files[file_name]['stripe-count']
-            
-            chunk_size = 1024
-            total_chunks = (striping_unit + chunk_size - 1) // chunk_size
-            (block, block_index, block_type) = self.files[file_name]["stripes"][stripe_number]
-            print(f"✅ Read block {stripe_number} for file {file_name}, size={len(block)} bytes")
+            random_bit_flip = random.randint(0, 100) < self.random_bit_flip
 
-            for i in range(total_chunks):
-                chunck = block[i:i+chunk_size]
+            stripe_data = self.files[file_name]['data'][stripe_number]        
+            stripe_type = self.files[file_name]['type'][stripe_number]
+            stripe_index = self.files[file_name]['block_index'][stripe_number]
+            n = self.files[file_name]['n']
+
+            # Flip the first bit of the first chunk if random_bit_flip is True
+            print(f"🔄 Flipping first bit: {random_bit_flip}")
+            if random_bit_flip and stripe_data and stripe_data[0] is not None:
+                # Decode the base64 chunk to bytes
+                try:
+                    decoded_chunk = base64.b64decode(stripe_data[0])
+                    if len(decoded_chunk) > 0:
+                        # Convert to bytearray to allow modification
+                        chunk_bytes = bytearray(decoded_chunk)
+                        # Flip the first bit (LSB) of the first byte
+                        chunk_bytes[0] ^= 1
+                        # Re-encode back to base64
+                        stripe_data[0] = base64.b64encode(bytes(chunk_bytes)).decode('utf-8')
+                        print(f"✅ Flipped first bit of first chunk in stripe {stripe_number}")
+                except Exception as e:
+                    print(f"❌ Error flipping bit: {e}")
+
+            for i in range(len(stripe_data)):
+                chunk = stripe_data[i]
+                block_type = stripe_type
+                block_index = stripe_index
+                total_chunks = len(stripe_data)
+                stripe_count = len(self.files[file_name]['data'])
+                # if random_bit_flip and chunck:
+                #     chunck = chunck[1:]
+
                 message = {
                     "type": "read",
                     "data": {
-                        "chunk": base64.b64encode(chunck).decode('utf-8'),
+                        "chunk": chunk,
                         "chunk-index": i,
                         "chunk-count": total_chunks,
                         "block-type": block_type,
@@ -245,28 +233,30 @@ class DiskProcess:
                         "stripe-number": stripe_number,
                         "stripe-count": stripe_count,
                         "n": n,
-                        "striping-unit": striping_unit,
                         "file-name": file_name,
                     }
                 }
+                print(f"Reading chunk {i} of block {block_index} of type {block_type} for file {file_name}, stripe {stripe_number}")
                 self.send_with_command_port(message, addr)
 
-            ack_message = {
+            message = {
                 "type": "read-complete",
                 "data": {
                     "status": "success",
+                    "message": f"✅ Read block {stripe_number} for file {file_name} successfully",
                     "file-name": file_name,
-                    "message": f"Read block {stripe_number} for file {file_name} completed successfully"
+                    "n": n,
                 }
             }
-            self.send_with_command_port(ack_message, addr)
+            self.send_with_command_port(message, addr)
+
         except Exception as e:
             print(f"❌ Error handling read message: {e}")
             ack_message = {
                 "type": "read-ack",
                 "data": {
                     "status": "error",
-                    "message": f"Error reading block: {e}"
+                    "message": f"❌ Error reading block: {e}"
                 }
             }
             self.send_with_command_port(ack_message, addr)
@@ -276,17 +266,15 @@ class DiskProcess:
 
     def send_to_manager(self, message):
         """Send message to manager and return response"""
-        print(f"Sending message.{message.get('type')} to manager address {self.manager_address[0]}:{self.manager_address[1]}")
-        print("=" * 20)
+        print(f"📨 Sending {message.get('type')} message to manager address {self.manager_address[0]}:{self.manager_address[1]}")
 
         self.manager_socket.sendto(json.dumps(message).encode(), self.manager_address)
 
-    def send_with_command_port(self, message, address):
+    def send_with_command_port(self, message, addr):
         """Send message to command and return response"""
-        print(f"Sending message.{message.get('type')} to command address {address[0]}:{address[1]}")
-        print("=" * 20)
+        print(f"📨 Sending {message.get('type')} message to command address {addr[0]}:{addr[1]}")
 
-        self.command_socket.sendto(json.dumps(message).encode(), address)
+        self.command_socket.sendto(json.dumps(message).encode(), addr)
 
     # ---------------------------------------------------------------
 

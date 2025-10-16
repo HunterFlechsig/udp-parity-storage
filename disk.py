@@ -149,7 +149,17 @@ class DiskProcess:
         """Handle fail message"""
         print("💥 Simulating disk failure...")
         self.files = {}
+
         print("🛑 Disk has failed and all data has been lost.")
+
+        message = {
+            "type": "fail-ack",
+            "data": {
+                "status": "success",
+                "message": f"🛑 Disk has failed and all data has been lost.",
+            },
+        }
+        self.send_with_command_port(message, addr)
 
     def handle_copy(self, message, addr):
         """Handle copy message"""

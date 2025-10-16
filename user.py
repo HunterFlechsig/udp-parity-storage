@@ -36,7 +36,6 @@ class UserProcess:
         self.read_buffer = {}
         self.read_complete_buffer = {}
         self.lock = threading.Lock()
-        self.disk_failure_buffer = {}
 
     # ----------------- Port handlers ------------------------------
 
@@ -170,8 +169,6 @@ class UserProcess:
                     self.handle_read_complete(message)
                 case "copy-ack":
                     print(f"{message.get('data', {}).get('message', 'No message')}")
-                case "fail-complete":
-                    self.handle_disk_failure_complete(message)
                 case _:
                     print(
                         f"Unknown client message: {message.get('type', 'Unknown type')}"
@@ -181,40 +178,6 @@ class UserProcess:
 
     # ------------------- Response handlers ------------------------------
 
-    def handle_disk_failure_complete(self, message):
-        """Handle read message"""
-        data = message.get("data", {}).get("data", {})
-        file_name = data.get("file-name")
-        file_size = data.get("file-size")
-        n = data.get("n")
-        striping_unit = data.get("striping-unit")
-        disks = data.get("disks")
-
-        num_stripes = math.ceil(file_size / ((n - 1) * striping_unit))
-
-        for i in range(num_stripes):
-            # while not verified success
-            while True:
-                self.read_complete = False
-                threads = []
-                for disk_inx in range(len(disks)):
-                    t = threading.Thread(
-                        target=self.read_disk_worker,
-                        args=(disks[disk_inx], file_name, i, striping_unit),
-                    )
-                    t.start()
-                    threads.append(t)
-
-                for t in threads:
-                    t.join()
-
-                while not self.read_complete:
-                    time.sleep(0.1)
-
-                if self.check_stripe(i, file_name, n):
-                    print(f"⌛ Checking Stripe {i}")
-                    break
-
     def handle_disk_failure(self, message):
         dss_data = message.get("data", {}).get("data", {})
 
@@ -222,8 +185,6 @@ class UserProcess:
 
         # pick a disk
         disk = random.choice(dss_data.get("disks", []))
-        buffer_data = {**dss_data, "failed-disk": disk}
-        self.disk_failure_buffer[dss_data.get("dss-name")] = buffer_data
 
         print(f"Handling disk failure. Disk: {disk['disk-name']}")
 
@@ -231,6 +192,27 @@ class UserProcess:
             "type": "fail",
         }
         self.send_with_command_port(message, (disk["Ipv4"], disk["c-port"]))
+
+        try:
+            # Note: using existing command_socket from thread, don't close it
+            original_timeout = self.command_socket.gettimeout()
+            self.command_socket.settimeout(10.0)  # wait up to 10 seconds
+            data, addr = self.command_socket.recvfrom(1024)
+            response = json.loads(data.decode())
+
+            print(
+                f"📩 Command port received message from {addr[0]}:{addr[1]} of type {response.get('type', 'Unknown type')}"
+            )
+
+            if response.get("type") == "fail-ack":
+                self.disk_failure(dss_data, disk)
+        except socket.timeout:
+            print("❌ Timeout waiting for fail-ack from disk")
+        except Exception as e:
+            print(f"❌ Client port error while handling disk failure: {e}")
+        finally:
+            # Restore original timeout
+            self.command_socket.settimeout(original_timeout)
 
     def handle_read_complete(self, message):
         """Handle read complete message"""

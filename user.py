@@ -13,6 +13,8 @@ import os
 import base64
 import math
 import filecmp
+import random
+
 
 class UserProcess:
     def __init__(self, name, ip, m_port, c_port, manager_address):
@@ -23,8 +25,8 @@ class UserProcess:
         self.manager_address = manager_address
         self.running = True
         self.registered = False
-        self.manager_socket = None
-        self.command_socket = None
+        self.manager_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
         self.read_complete = False
 
@@ -34,12 +36,13 @@ class UserProcess:
         self.read_buffer = {}
         self.read_complete_buffer = {}
         self.lock = threading.Lock()
+        self.disk_failure_buffer = {}
 
     # ----------------- Port handlers ------------------------------
 
     def handle_manager_port(self):
         """Handle manager port (m_port)"""
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as self.manager_socket:
+        with self.manager_socket:
             try:
                 self.manager_socket.bind((self.ip, self.m_port))
             except Exception as e:
@@ -49,21 +52,23 @@ class UserProcess:
 
             while self.running:
                 try:
-                    self.manager_socket.settimeout(1.0) # allow checking self.running
+                    self.manager_socket.settimeout(1.0)  # allow checking self.running
                     data, addr = self.manager_socket.recvfrom(1024)
                     message = json.loads(data.decode())
 
-                    print(f"📩 Manager port received message from {addr[0]}:{addr[1]} of type {message.get('type', 'Unknown type')}")
+                    print(
+                        f"📩 Manager port received message from {addr[0]}:{addr[1]} of type {message.get('type', 'Unknown type')}"
+                    )
 
                     # process manager messages
                     self.process_manager_message(message)
-                
+
                 except socket.timeout:
                     continue
                 except Exception as e:
                     if self.running:
                         print(f"❌ Manager port error: {e}")
-    
+
     def handle_command_port(self):
         """Handle command port (c_port)"""
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as self.command_socket:
@@ -76,12 +81,14 @@ class UserProcess:
 
             while self.running:
                 try:
-                    self.command_socket.settimeout(1.0) # allow checking self.running
+                    self.command_socket.settimeout(1.0)  # allow checking self.running
                     data, addr = self.command_socket.recvfrom(8192)
                     message = json.loads(data.decode())
 
-                    print(f"📩 Command port received message from {addr[0]}:{addr[1]} of type {message.get('type', 'Unknown type')}")
-                    
+                    print(
+                        f"📩 Command port received message from {addr[0]}:{addr[1]} of type {message.get('type', 'Unknown type')}"
+                    )
+
                     # process client messages
                     self.process_command_message(message)
 
@@ -92,80 +99,151 @@ class UserProcess:
                         print(f"❌ Client port error: {e}")
 
     # ----------------- Message handlers ------------------------------
-    
+
     def process_manager_message(self, message):
         """Process messages received on manager port"""
         try:
-            match message.get('type'):
-                case 'register-user':
+            match message.get("type"):
+                case "register-user":
 
-                    if message.get('data', {}).get('status', 'No status') == 'success':
-                            self.registered = True
-                            print("✅ Registration successful!")
+                    if message.get("data", {}).get("status", "No status") == "success":
+                        self.registered = True
+                        print("✅ Registration successful!")
                     else:
-                            self.running = False
-                            print(f"❌ Error Registering User: {message.get('data', {}).get('message', 'No message')}")
-                            os._exit(1)
+                        self.running = False
+                        print(
+                            f"❌ Error Registering User: {message.get('data', {}).get('message', 'No message')}"
+                        )
+                        os._exit(1)
 
-                case 'deregister-user':
+                case "deregister-user":
 
-                    if message.get('data', {}).get('status', 'No status') == 'success':
+                    if message.get("data", {}).get("status", "No status") == "success":
                         self.running = False
                         self.registered = False
                         print("✅ Deregistration successful! Exiting...")
                         os._exit(0)
                     else:
-                        print(f"❌ Error Deregistering User: {message.get('data', {}).get('message', 'No message')}")
+                        print(
+                            f"❌ Error Deregistering User: {message.get('data', {}).get('message', 'No message')}"
+                        )
 
-
-                case 'copy':
+                case "copy":
                     self.handle_copy(message)
 
-                case 'read':
+                case "read":
                     self.handle_read(message)
 
-                case 'configure-dss':
-                    if message.get('data', {}).get('status', 'No status') == 'success':
+                case "configure-dss":
+                    if message.get("data", {}).get("status", "No status") == "success":
                         print("✅ Configure DSS successful!")
                     else:
-                        print(f"❌ Error Configuring DSS: {message.get('data', {}).get('message', 'No message')}")
-                
+                        print(
+                            f"❌ Error Configuring DSS: {message.get('data', {}).get('message', 'No message')}"
+                        )
+
+                case "ls-res":
+                    if message.get("data", {}).get("status", "No status") == "success":
+                        files = message.get("data", {}).get("data", [])
+                        print("Files in system:")
+                        print(files)
+
+                case "disk-failure-res":
+                    self.handle_disk_failure(message)
+
                 case _:
-                    print(f"Unknown manager message: {message.get('type', 'Unknown type')}")
+                    print(
+                        f"Unknown manager message: {message.get('type', 'Unknown type')}"
+                    )
                     return
 
         except Exception as e:
             print(f"Error processing manager message: {e}")
 
-    
     def process_command_message(self, message):
         """Process messages received on command port"""
         try:
-            match message.get('type'):
-                case 'read':
+            match message.get("type"):
+                case "read":
                     self.handle_read_command(message)
-                case 'read-complete':
+                case "read-complete":
                     self.handle_read_complete(message)
-                case 'copy-ack':
+                case "copy-ack":
                     print(f"{message.get('data', {}).get('message', 'No message')}")
+                case "fail-complete":
+                    self.handle_disk_failure_complete(message)
                 case _:
-                    print(f"Unknown client message: {message.get('type', 'Unknown type')}")
+                    print(
+                        f"Unknown client message: {message.get('type', 'Unknown type')}"
+                    )
         except Exception as e:
             print(f"Error processing client message: {e}")
 
-    
     # ------------------- Response handlers ------------------------------
+
+    def handle_disk_failure_complete(self, message):
+        """Handle read message"""
+        data = message.get("data", {}).get("data", {})
+        file_name = data.get("file-name")
+        file_size = data.get("file-size")
+        n = data.get("n")
+        striping_unit = data.get("striping-unit")
+        disks = data.get("disks")
+
+        num_stripes = math.ceil(file_size / ((n - 1) * striping_unit))
+
+        for i in range(num_stripes):
+            # while not verified success
+            while True:
+                self.read_complete = False
+                threads = []
+                for disk_inx in range(len(disks)):
+                    t = threading.Thread(
+                        target=self.read_disk_worker,
+                        args=(disks[disk_inx], file_name, i, striping_unit),
+                    )
+                    t.start()
+                    threads.append(t)
+
+                for t in threads:
+                    t.join()
+
+                while not self.read_complete:
+                    time.sleep(0.1)
+
+                if self.check_stripe(i, file_name, n):
+                    print(f"⌛ Checking Stripe {i}")
+                    break
+
+    def handle_disk_failure(self, message):
+        dss_data = message.get("data", {}).get("data", {})
+
+        print(f"Handling disk failure: {dss_data}")
+
+        # pick a disk
+        disk = random.choice(dss_data.get("disks", []))
+        buffer_data = {**dss_data, "failed-disk": disk}
+        self.disk_failure_buffer[dss_data.get("dss-name")] = buffer_data
+
+        print(f"Handling disk failure. Disk: {disk['disk-name']}")
+
+        message = {
+            "type": "fail",
+        }
+        self.send_with_command_port(message, (disk["Ipv4"], disk["c-port"]))
 
     def handle_read_complete(self, message):
         """Handle read complete message"""
 
-        data = message.get('data', {})
-        file_name = data.get('file-name')
-        n = data.get('n')
-        block_index = data.get('block-index')
-        stripe_index = data.get('stripe-index')
+        data = message.get("data", {})
+        file_name = data.get("file-name")
+        n = data.get("n")
+        block_index = data.get("block-index")
+        stripe_index = data.get("stripe-index")
 
-        print(f"Read complete message received for file {file_name}, stripe {stripe_index}, block {block_index}")
+        print(
+            f"Read complete message received for file {file_name}, stripe {stripe_index}, block {block_index}"
+        )
 
         if file_name not in self.read_complete_buffer:
             self.read_complete_buffer[file_name] = 0
@@ -179,33 +257,60 @@ class UserProcess:
     def handle_read_command(self, message):
         """Handle read message"""
 
-        data = message.get('data', {})
-        file_name = data.get('file-name')
-        stripe_number = data.get('stripe-number')
-        stripe_count = data.get('stripe-count')
-        block_index = data.get('block-index')
-        n = data.get('n')
-        chunk_index = data.get('chunk-index')
-        chunk_count = data.get('chunk-count')
-        chunk = data.get('chunk')
-        block_type = data.get('block-type')
-        
-        print(f"Saving data for file {file_name}, stripe {stripe_number}, block {block_index}, chunk {chunk_index}")
+        data = message.get("data", {})
+        file_name = data.get("file-name")
+        stripe_number = data.get("stripe-number")
+        stripe_count = data.get("stripe-count")
+        block_index = data.get("block-index")
+        n = data.get("n")
+        chunk_index = data.get("chunk-index")
+        chunk_count = data.get("chunk-count")
+        chunk = data.get("chunk")
+        block_type = data.get("block-type")
+
+        print(
+            f"Saving data for file {file_name}, stripe {stripe_number}, block {block_index}, chunk {chunk_index}"
+        )
 
         # Initialize buffer if needed
         if file_name not in self.read_buffer:
-            self.read_buffer[file_name] = { 'data' : [[[None for _ in range(chunk_count)] for _ in range(n)] for _ in range(stripe_count)], 'type': [[None for _ in range(n)] for _ in range(stripe_count)], 'block_index': [[None for _ in range(n)] for _ in range(stripe_count)], 'n': n }
+            self.read_buffer[file_name] = {
+                "data": [
+                    [[None for _ in range(chunk_count)] for _ in range(n)]
+                    for _ in range(stripe_count)
+                ],
+                "type": [[None for _ in range(n)] for _ in range(stripe_count)],
+                "block_index": [[None for _ in range(n)] for _ in range(stripe_count)],
+                "n": n,
+            }
 
-        self.read_buffer[file_name]['data'][stripe_number][block_index % n][chunk_index] = base64.b64decode(chunk)
-        self.read_buffer[file_name]['type'][stripe_number][block_index % n] = block_type
-        self.read_buffer[file_name]['block_index'][stripe_number][block_index % n] = block_index
+        self.read_buffer[file_name]["data"][stripe_number][block_index % n][
+            chunk_index
+        ] = base64.b64decode(chunk)
+        self.read_buffer[file_name]["type"][stripe_number][block_index % n] = block_type
+        self.read_buffer[file_name]["block_index"][stripe_number][
+            block_index % n
+        ] = block_index
 
-    def copy_to_disk_worker(self, disk, file_name, block, block_type, stripe_index, stripe_count, block_index, n, chunk_count):
+    def copy_to_disk_worker(
+        self,
+        disk,
+        file_name,
+        block,
+        block_type,
+        stripe_index,
+        stripe_count,
+        block_index,
+        n,
+        chunk_count,
+    ):
         """Copy to disk worker"""
 
         for i in range(chunk_count):
-            print(f"Copying Stripe {stripe_index}, block {block_index}, chunk {chunk_count}")
-            chunk_data = block[i*self.chunk_size:(i+1)*self.chunk_size]
+            print(
+                f"Copying Stripe {stripe_index}, block {block_index}, chunk {chunk_count}"
+            )
+            chunk_data = block[i * self.chunk_size : (i + 1) * self.chunk_size]
             encoded_chunk = base64.b64encode(chunk_data).decode()
             message = {
                 "type": "copy",
@@ -219,30 +324,30 @@ class UserProcess:
                     "stripe-count": stripe_count,
                     "block-index": block_index,
                     "n": n,
-                }
+                },
             }
-            self.send_with_command_port(message, (disk['Ipv4'], disk['c-port']))  
+            self.send_with_command_port(message, (disk["Ipv4"], disk["c-port"]))
 
     def handle_copy(self, message):
         """Handle copy message"""
-        data = message.get('data', {}).get('data', {})
-        file_name = data.get('file-name')
-        file_size = data.get('file-size')
-        n = data.get('n')
-        striping_unit = data.get('striping-unit')
-        disks = data.get('disks')
-        dss_name = data.get('dss-name', 'No DSS name')
+        data = message.get("data", {}).get("data", {})
+        file_name = data.get("file-name")
+        file_size = data.get("file-size")
+        n = data.get("n")
+        striping_unit = data.get("striping-unit")
+        disks = data.get("disks")
+        dss_name = data.get("dss-name", "No DSS name")
 
-        num_stripes = math.ceil(file_size / ((n-1) * striping_unit))
+        num_stripes = math.ceil(file_size / ((n - 1) * striping_unit))
 
-        print(f"Copying file {file_name} to dss {dss_name}")        
+        print(f"Copying file {file_name} to dss {dss_name}")
 
         with open(self.file_copy_path(file_name), "rb") as f:
-           
+
             for i in range(num_stripes):
                 blocks = []
                 stripe = None
-                for _ in range(n-1):
+                for _ in range(n - 1):
                     block = f.read(striping_unit)
 
                     # pad with nulls if not enough bytes
@@ -257,25 +362,37 @@ class UserProcess:
                 threads = []
                 total_chunks = (striping_unit + self.chunk_size - 1) // self.chunk_size
                 for disk_inx, block in enumerate(blocks):
-                    block_index = i*n + disk_inx
-                    parity = (disk_inx == i%n)
+                    block_index = i * n + disk_inx
+                    parity = disk_inx == i % n
                     block_type = "parity" if parity else "data"
-                    t = threading.Thread(target=self.copy_to_disk_worker, args=(disks[disk_inx], file_name, block, block_type, i, num_stripes, block_index, n, total_chunks))
+                    t = threading.Thread(
+                        target=self.copy_to_disk_worker,
+                        args=(
+                            disks[disk_inx],
+                            file_name,
+                            block,
+                            block_type,
+                            i,
+                            num_stripes,
+                            block_index,
+                            n,
+                            total_chunks,
+                        ),
+                    )
                     t.start()
                     threads.append(t)
 
                 for t in threads:
                     t.join()
-        message = {
-            "type": "copy-complete",
-            "data": {}
-        }
+        message = {"type": "copy-complete", "data": {}}
         self.send_to_manager(message)
 
     def read_disk_worker(self, disk, file_name, stripe_number, striping_unit):
         """Read from disk worker with non-blocking select approach"""
         try:
-            print(f"Reading Block from Stripe {stripe_number}, from disk {disk['disk-name']}")
+            print(
+                f"Reading Block from Stripe {stripe_number}, from disk {disk['disk-name']}"
+            )
             # Send read request
             message = {
                 "type": "read",
@@ -283,46 +400,48 @@ class UserProcess:
                     "file-name": file_name,
                     "stripe-number": stripe_number,
                     "striping-unit": striping_unit,
-                }
+                },
             }
-            self.send_with_command_port(message, (disk['Ipv4'], disk['c-port']))
+            self.send_with_command_port(message, (disk["Ipv4"], disk["c-port"]))
 
         except Exception as e:
-            print(f"❌ Error reading from {disk['disk-name']} stripe {stripe_number}: {e}")
-
+            print(
+                f"❌ Error reading from {disk['disk-name']} stripe {stripe_number}: {e}"
+            )
 
     def handle_read(self, message):
         """Handle read message"""
-        data = message.get('data', {}).get('data', {})
-        file_name = data.get('file-name')
-        file_size = data.get('file-size')
-        n = data.get('n')
-        striping_unit = data.get('striping-unit')
-        disks = data.get('disks')
+        data = message.get("data", {}).get("data", {})
+        file_name = data.get("file-name")
+        file_size = data.get("file-size")
+        n = data.get("n")
+        striping_unit = data.get("striping-unit")
+        disks = data.get("disks")
 
-        num_stripes = math.ceil(file_size / ((n-1) * striping_unit))
+        num_stripes = math.ceil(file_size / ((n - 1) * striping_unit))
 
-        # Open file once for writing
-        with open(file_name + "_read", "wb") as f:
-            for i in range(num_stripes):
-                # while not verified success
-                while True:
-                    self.read_complete = False
-                    threads = []
-                    for disk_inx in range(len(disks)):
-                        t = threading.Thread(target=self.read_disk_worker, args=(disks[disk_inx], file_name, i, striping_unit))
-                        t.start()
-                        threads.append(t)
+        for i in range(num_stripes):
+            # while not verified success
+            while True:
+                self.read_complete = False
+                threads = []
+                for disk_inx in range(len(disks)):
+                    t = threading.Thread(
+                        target=self.read_disk_worker,
+                        args=(disks[disk_inx], file_name, i, striping_unit),
+                    )
+                    t.start()
+                    threads.append(t)
 
-                    for t in threads:
-                        t.join()
+                for t in threads:
+                    t.join()
 
-                    while not self.read_complete:
-                        time.sleep(0.1)
-                    
-                    if (self.check_stripe(i, file_name, n)):
-                        print(f"⌛ Checking Stripe {i}")
-                        break
+                while not self.read_complete:
+                    time.sleep(0.1)
+
+                if self.check_stripe(i, file_name, n):
+                    print(f"⌛ Checking Stripe {i}")
+                    break
 
         self.construct_file(file_name)
 
@@ -330,28 +449,39 @@ class UserProcess:
 
     def send_to_manager(self, message):
         """Send message to manager and return response"""
-        print(f"📨 Sending {message.get('type')} message to manager address {self.manager_address[0]}:{self.manager_address[1]}")
-        
+        print(
+            f"📨 Sending {message.get('type')} message to manager address {self.manager_address[0]}:{self.manager_address[1]}"
+        )
+
         self.manager_socket.sendto(json.dumps(message).encode(), self.manager_address)
 
     def send_with_command_port(self, message, addr):
         """Send message to command and return response"""
-        print(f"📨 Sending {message.get('type')} message to command address {addr[0]}:{addr[1]}")
+        print(
+            f"📨 Sending {message.get('type')} message to command address {addr[0]}:{addr[1]}"
+        )
 
         self.command_socket.sendto(json.dumps(message).encode(), addr)
 
     def construct_file(self, file_name):
         """Handle read complete message"""
-        
+        # Write the cleaned data to file
+        # delete file if it already exists
+        file_path = "./files-read/" + file_name + ".txt"
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
         # Collect all data first - only from data blocks, not parity blocks
         all_data = b""
-        
-        for stripe_index, stripe in enumerate(self.read_buffer[file_name]['data']):
+
+        for stripe_index, stripe in enumerate(self.read_buffer[file_name]["data"]):
             for block_index, block in enumerate(stripe):
                 # Check if this is a data block (not parity)
                 if block and all(chunk for chunk in block):
-                    block_type = self.read_buffer[file_name]['type'][stripe_index][block_index]
-                    if block_type == 'data':
+                    block_type = self.read_buffer[file_name]["type"][stripe_index][
+                        block_index
+                    ]
+                    if block_type == "data":
                         # This is a data block, collect all chunks
                         block_data = b""
                         for chunk in block:
@@ -360,16 +490,10 @@ class UserProcess:
                         all_data += block_data
 
         # Strip trailing null bytes
-        all_data = all_data.rstrip(b'\x00')
-        
-        # Write the cleaned data to file
-        # delete file if it already exists
-        file_path = "./files-read/" + file_name + ".txt"
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        all_data = all_data.rstrip(b"\x00")
         with open(file_path, "wb") as f:
             f.write(all_data)
-        
+
         del self.read_buffer[file_name]
 
         res = filecmp.cmp(file_path, self.file_copy_path(file_name))
@@ -379,14 +503,14 @@ class UserProcess:
             print("Files are different")
 
     def calculate_parity_chunk(self, chunks):
-        """Calculate parity chunk"""        
+        """Calculate parity chunk"""
         # Initialize with the first chunk
         parity_chunk = chunks[0]
-        
+
         # XOR with each subsequent chunk
         for chunk in chunks[1:]:
             parity_chunk = bytes(a ^ b for a, b in zip(parity_chunk, chunk))
-        
+
         return parity_chunk
 
     def check_stripe(self, stripe_number, file_name, n):
@@ -394,24 +518,25 @@ class UserProcess:
         """Check stripe and return blocks for parity comparison"""
         data_blocks = []
         parity_block = None
-        
+
         try:
-            stripe = self.read_buffer[file_name]['data'][stripe_number]
-            
-            for block_index, block in enumerate(stripe):                    
-                block_data = b''
+            stripe = self.read_buffer[file_name]["data"][stripe_number]
+
+            for block_index, block in enumerate(stripe):
+                block_data = b""
                 for chunk in block:
                     if chunk is not None:
                         block_data += chunk
-                
-                block_type = self.read_buffer[file_name]['type'][stripe_number][block_index]
-                    
-                if block_type == 'data':
+
+                block_type = self.read_buffer[file_name]["type"][stripe_number][
+                    block_index
+                ]
+
+                if block_type == "data":
                     data_blocks.append(block_data)
-                elif block_type == 'parity':
+                elif block_type == "parity":
                     parity_block = block_data
-                    
-                    
+
             calculated_parity_block = self.calculate_parity_chunk(data_blocks)
             if parity_block == calculated_parity_block:
                 print(f"✅ Stripe {stripe_number} is correct")
@@ -424,11 +549,8 @@ class UserProcess:
             print(f"❌ Error checking stripe {stripe_number} for file {file_name}: {e}")
             return False
 
-    
     def file_copy_path(self, file_name):
         return "./files-copy/" + file_name + ".txt"
-
-    
 
     # -----------------  Commands ------------------------------
 
@@ -440,19 +562,14 @@ class UserProcess:
                 "user-name": self.name,
                 "Ipv4": self.ip,
                 "m-port": self.m_port,
-                "c-port": self.c_port
-            }
+                "c-port": self.c_port,
+            },
         }
         self.send_to_manager(message)
 
     def send_deregister_user(self):
         """Send deregister user message to manager"""
-        message = {
-            "type": "deregister-user",
-            "data": {
-                "user-name": self.name
-            }
-        }
+        message = {"type": "deregister-user", "data": {"user-name": self.name}}
         self.send_to_manager(message)
 
     def send_configure_dss(self):
@@ -461,17 +578,13 @@ class UserProcess:
         n = input("Enter number of disks: ")
         striping_unit = input("Enter striping unit: ")
         print("\n")
-        
+
         message = {
             "type": "configure-dss",
-            "data": {
-                "dss-name": dss_name,
-                "n": n,
-                "striping-unit": striping_unit
-            }
+            "data": {"dss-name": dss_name, "n": n, "striping-unit": striping_unit},
         }
         self.send_to_manager(message)
-    
+
     def send_copy_file_to_dss(self):
         """Send copy file to dss message to manager"""
         files = os.listdir("./files-copy")
@@ -479,21 +592,21 @@ class UserProcess:
         for file in files:
             print(file)
         file_name = input("Enter file name: ")
-        try: 
+        try:
             file_size = os.path.getsize(self.file_copy_path(file_name))
         except Exception as e:
             print(f"❌ Error getting file size: {e}")
             return
-        
+
         print(f"\n")
-        
+
         message = {
             "type": "copy",
             "data": {
                 "file-name": file_name,
                 "file-size": file_size,
-                "owner": self.name
-            }
+                "owner": self.name,
+            },
         }
         self.send_to_manager(message)
 
@@ -502,14 +615,30 @@ class UserProcess:
         file_name = input("Enter file name: ")
         dss_name = input("Enter dss name: ")
         print(f"\n")
-        
+
         message = {
             "type": "read",
             "data": {
                 "file-name": file_name,
                 "dss-name": dss_name,
-                "user-name": self.name
-            }
+                "user-name": self.name,
+            },
+        }
+        self.send_to_manager(message)
+
+    def send_ls(self):
+        """Send ls message to manager"""
+        message = {"type": "ls", "data": {}}
+        self.send_to_manager(message)
+
+    def send_disk_failure(self):
+        """Send disk failure message to manager"""
+        dss_name = input("Enter dss name: ")
+        print(f"\n")
+
+        message = {
+            "type": "disk-failure",
+            "data": {"dss-name": dss_name},
         }
         self.send_to_manager(message)
 
@@ -542,14 +671,14 @@ class UserProcess:
             self.send_register_user()
         else:
             return
-        
+
         # Main command loop
         try:
             while self.running:
 
                 # Only show commands if user is registered
                 if not self.registered:
-                    time.sleep(0.1)                    
+                    time.sleep(0.1)
                     continue
 
                 """Print commands"""
@@ -561,19 +690,20 @@ class UserProcess:
                 print("4. ls")
                 print("5. deregister-user")
                 print("6. reprint commands")
-                print("7. exit")
+                print("7. disk failure")
+                print("8. exit")
                 print("=" * 20)
-                
+
                 # Check if we're still running before waiting for input
                 # if not self.running:
                 #     break
-                    
+
                 command = input("Enter command: ").strip()
-                
+
                 # Check if we're still running after getting input
                 # if not self.running:
                 #     break
-                    
+
                 if command == "1":
                     self.send_configure_dss()
                 elif command == "2":
@@ -587,6 +717,8 @@ class UserProcess:
                 elif command == "6":
                     continue
                 elif command == "7":
+                    self.send_disk_failure()
+                elif command == "8":
                     break
                 else:
                     print("❌ Invalid command")
@@ -607,21 +739,22 @@ def main():
 
     name = None
     ip = "127.0.0.1"
-    m_port = None
-    c_port = None
+    m_port = 31503
+    c_port = 31504
     ports = [31500, 31999]
-    
+
     manager_ip = "127.0.0.1"
     manager_port = ports[0]
 
     args = sys.argv[1:]
     options = "hn:i:m:c:M:P:h"
 
-    try: 
+    try:
         arguments, values = getopt.getopt(args, options)
         for currentArg, currentVal in arguments:
             if currentArg in ("-h", "--help"):
-                print("User Process Help \n" 
+                print(
+                    "User Process Help \n"
                     " -n: Name of the user (required) \n"
                     " -i: IP address of the user (default: 127.0.0.1) \n"
                     " -m: M port of the user (required) \n"
@@ -650,13 +783,15 @@ def main():
     if not (ports[0] <= m_port <= ports[1]):
         print(f"❌ Error: m-port {m_port} must be in range {ports[0]}-{ports[1]}")
         sys.exit(1)
-    
+
     if not (ports[0] <= c_port <= ports[1]):
         print(f"❌ Error: c-port {c_port} must be in range {ports[0]}-{ports[1]}")
         sys.exit(1)
-    
+
     if not (ports[0] <= manager_port <= ports[1]):
-        print(f"❌ Error: manager-port {manager_port} must be in range {ports[0]}-{ports[1]}")
+        print(
+            f"❌ Error: manager-port {manager_port} must be in range {ports[0]}-{ports[1]}"
+        )
         sys.exit(1)
 
     if name is None or ip is None or m_port is None or c_port is None:
@@ -664,11 +799,11 @@ def main():
         sys.exit(1)
 
     manager_address = (manager_ip, manager_port)
-    
+
     # Create and start user process
     user = UserProcess(name, ip, m_port, c_port, manager_address)
     user.start()
 
+
 if __name__ == "__main__":
     main()
-            

@@ -5,14 +5,21 @@ import time
 # Wait for manager to start up
 time.sleep(3)
 
+from utils import (
+    send_message,
+    ok_request,
+)
+
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-    message = {
-        "type": "configure-dss",
-        "data": {
-            "dss-name": "dss1",
-            "n": 3,
-            "striping-unit": 16384
-        }
-    }
-    s.sendto(json.dumps(message).encode(), ("127.0.0.1", 31500))
-    print("Sent configure-dss message to manager")
+    send_message(
+        s,
+        ("127.0.0.1", 5000),
+        ok_request(
+            "configure-dss",
+            {
+                "name": "my_dss",
+                "num_disks": 3,
+                "striping_unit": 1024,
+            },
+        ),
+    )

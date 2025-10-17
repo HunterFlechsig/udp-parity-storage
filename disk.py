@@ -5,13 +5,24 @@
 # Disk process uses separate threads to manage manager (m) and client (c) ports
 
 import socket
-import json
 import threading
-import time
-import getopt
 import sys
-import base64
-import random
+from utils import (
+    recieve_message,
+    disk_command_line_args,
+    send_message,
+    ok_request,
+    ok_response,
+    check_ok,
+    ThreadEvents,
+    generate_id,
+    store_chunk,
+)
+
+
+def print_commands():
+    print("Disk Commands")
+    print("1. deregister        - deregister with manager and exit")
 
 
 class DiskProcess:
@@ -21,462 +32,207 @@ class DiskProcess:
         self.m_port = m_port
         self.c_port = c_port
         self.manager_address = manager_address
+
         self.running = True
-        self.registered = False
+
         self.manager_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.manager_socket.bind((self.ip, self.m_port))
+        self.command_socket.bind((self.ip, self.c_port))
 
-        self.random_bit_flip = 30
+        self.files_data = {}
+        self.events = ThreadEvents()
+        self.register_user()
 
-        self.files = {}  # dictionary to store files and their data
+    def register_user(self):
+        send_message(
+            self.manager_socket,
+            self.manager_address,
+            ok_request(
+                "register-disk",
+                {
+                    "name": self.name,
+                    "ip": self.ip,
+                    "c_port": self.c_port,
+                    "m_port": self.m_port,
+                },
+            ),
+        )
 
-        # thread safe data structures
-        self.lock = threading.Lock()
+        message, _ = recieve_message(self.manager_socket, 3)
+
+        print(message)
+
+        if message is None:
+            print("No register disk message recieved from manager")
+            sys.exit(1)
+
+        if not check_ok(message, "response", "register-disk"):
+            print("Failed to register disk : ", message.get("error"))
+            sys.exit(1)
+
+        print("Disk registered successfully")
+        self.start()
+
+    def deregister_disk(self):
+        id = generate_id()
+        send_message(
+            self.manager_socket,
+            self.manager_address,
+            ok_request(
+                "deregister-disk",
+                {
+                    "name": self.name,
+                },
+                id=id,
+            ),
+        )
+
+        message = self.events.add_event_and_wait(id, timeout=5)
+
+        if message is None:
+            print("❌ Deregister timeout - no response from manager")
+            return
+
+        if not check_ok(message, "response", "deregister-disk"):
+            print("deregister unsucessful")
+            return
+
+        print("dergister sucessful")
+        self.running = False
+
+    def start(self):
+        # Start the manager port listener thread
+        threading.Thread(target=self.handle_manager_port, daemon=True).start()
+        # Start the command port listener thread
+        threading.Thread(target=self.handle_command_port, daemon=True).start()
+
+        with self.manager_socket, self.command_socket:
+            while self.running:
+                print_commands()
+                command = input("input command:")
+
+                match command:
+                    case "1":
+                        self.deregister_disk()
+                    case _:
+                        print("Unkown Command")
 
     def handle_manager_port(self):
         """Handle manager port (m_port)"""
-        with self.manager_socket:
-            self.manager_socket.bind((self.ip, self.m_port))
-            print(f"✅ Manager port {self.m_port} listening on {self.ip}")
+        while self.running:
+            message, addr = recieve_message(self.manager_socket)
+            if message is None:
+                continue
 
-            while self.running:
-                try:
-                    self.manager_socket.settimeout(1.0)  # allow checking self.running
-                    data, addr = self.manager_socket.recvfrom(8024)
-                    message = json.loads(data.decode())
+            print(message)
 
-                    print(
-                        f"📩 Manager port received message from {addr[0]}:{addr[1]} of type {message.get('type', 'Unknown type')}"
-                    )
-
-                    # process manager messages
-                    self.process_manager_message(message, addr)
-
-                except socket.timeout:
-                    continue
-                except Exception as e:
-                    if self.running:
-                        print(f"❌ Manager port error: {e}")
+            type, action, id = (
+                message.get("type"),
+                message.get("action"),
+                message.get("id"),
+            )
+            match type, action:
+                case "response", "deregister-disk":
+                    self.events.set_event(id, message)
+                case _:
+                    print(f"❌ Unknown message ({type}, {action}) from manager")
 
     def handle_command_port(self):
         """Handle command port (c_port)"""
-        with self.command_socket:
-            try:
-                self.command_socket.bind((self.ip, self.c_port))
-            except Exception as e:
-                print(f"❌ Error binding client port: {e}")
-                self.running = False
-                return
+        while self.running:
+            message, addr = recieve_message(self.command_socket)
+            if message is None:
+                continue
 
-            print(f"✅ Client port {self.c_port} listening on {self.ip}")
-
-            while self.running:
-                try:
-                    self.command_socket.settimeout(1.0)  # allow checking self.running
-                    data, addr = self.command_socket.recvfrom(8192)
-                    message = json.loads(data.decode())
-
-                    print(
-                        f"📩 Command port received message from {addr[0]}:{addr[1]} of type {message.get('type', 'Unknown type')}"
-                    )
-
-                    # process client messages
-                    self.process_command_message(message, addr)
-
-                except socket.timeout:
-                    continue
-                except Exception as e:
-                    if self.running:
-                        print(f"❌ Client port error: {e}")
-
-    # ---------------------------------------------------------------
-
-    def process_manager_message(self, message, addr):
-        """Process messages received on manager port"""
-        try:
-            match message.get("type"):
-                case "register-disk":
-                    if message.get("data", {}).get("status", "No status") == "success":
-                        self.registered = True
-                        print(f"✅ Disk {self.name} registered successfully")
-                    else:
-                        self.running = False
-                        print(
-                            f"message: {message.get('data', {}).get('message', 'No message')}"
-                        )
-                        sys.exit(1)
-
-                case "deregister-disk":
-                    if message.get("data", {}).get("status", "No status") == "success":
-                        self.running = False
-                        self.registered = False
-                        print(f"✅ Disk {self.name} deregistered successfully")
-                        sys.exit(0)
-                    else:
-                        print(
-                            f"message: {message.get('data', {}).get('message', 'No message')}"
-                        )
-
-                case _:
-                    print(
-                        f"Unknown manager message: {message.get('type', 'Unknown type')}"
-                    )
-                    return
-        except Exception as e:
-            print(f"Error processing manager message: {e}")
-
-    def process_command_message(self, message, addr):
-        """Process messages received on command port"""
-        try:
-            print(f"Processing command message: {message.get('type', 'Unknown type')}")
-            match message.get("type"):
-                case "copy":
-                    self.handle_copy(message, addr)
-                case "read":
-                    self.handle_read(message, addr)
-                case "fail":
-                    self.handle_fail(message, addr)
-                case _:
-                    print(
-                        f"Unknown command message: {message.get('type', 'Unknown type')}"
-                    )
-        except Exception as e:
-            print(f"Error processing client message: {e}")
-
-    # ------------------- Response handlers ------------------------------
-
-    def handle_fail(self, message, addr):
-        """Handle fail message"""
-        print("💥 Simulating disk failure...")
-        self.files = {}
-
-        print("🛑 Disk has failed and all data has been lost.")
-
-        message = {
-            "type": "fail-ack",
-            "data": {
-                "status": "success",
-                "message": f"🛑 Disk has failed and all data has been lost.",
-            },
-        }
-        self.send_with_command_port(message, addr)
-
-    def handle_copy(self, message, addr):
-        """Handle copy message"""
-        try:
-            data = message.get("data", {})
-            file_name = data.get("file-name")
-            block_type = data.get("block-type")
-            stripe_index = data.get("stripe-index")
-            stripe_count = data.get("stripe-count")
-            block_index = data.get("block-index")
-            chunk = data.get("chunk")
-            chunk_index = data.get("chunk-index")
-            chunk_count = data.get("chunk-count")
-            n = data.get("n")
-
-            # Initialize as empty bytes if it doesn't exist
-            if file_name not in self.files:
-                self.files[file_name] = {
-                    "data": [
-                        [None for _ in range(chunk_count)] for _ in range(stripe_count)
-                    ],
-                    "type": [None for _ in range(stripe_count)],
-                    "block_index": [None for _ in range(stripe_count)],
-                    "n": n,
-                }
-
-            # Store chunk and metadata for this stripe
-            self.files[file_name]["data"][stripe_index][chunk_index] = chunk
-            self.files[file_name]["type"][stripe_index] = block_type
-            self.files[file_name]["block_index"][stripe_index] = block_index
-
-            print(
-                f"Storing block {block_index} of type {block_type} for file {file_name}, stripe {stripe_index}"
+            type, action, id = (
+                message.get("type"),
+                message.get("action"),
+                message.get("id"),
             )
 
-            ack_message = {
-                "type": "copy-ack",
-                "data": {
-                    "status": "success",
-                    "message": f"✅ Block {block_index} of type {block_type} for file {file_name}, stripe {stripe_index} stored successfully",
-                },
-            }
-            self.send_with_command_port(ack_message, addr)
+            # Check if this is a response to a waiting event
+            if self.events.event_exists(id):
+                self.events.set_event(id, message)
+                continue
 
-        except Exception as e:
-            print(f"❌ Error handling copy message: {e}")
-            ack_message = {
-                "type": "acknowledge",
-                "data": {"status": "error", "message": f"❌ Error storing block: {e}"},
-            }
-            self.send_with_command_port(ack_message, addr)
+            match type, action:
+                case "request", "copy-block":
+                    self.handle_copy_block(message, addr)
 
-    def handle_read(self, message, addr):
-        """Handle read message"""
-        try:
+                case "request", "copy-chunk":
+                    self.handle_copy_chunk(message, addr)
+                case _:
+                    print(f"❌ Unknown message ({type}, {action}) from client")
 
-            data = message.get("data", {})
-            file_name = data.get("file-name")
-            stripe_number = data.get("stripe-number")
+    def handle_copy_block(self, message, addr):
+        """Handle initial copy-block request - sets up for receiving chunks"""
+        data = message.get("data")
+        filename = data.get("file-name")
+        block_index = data.get("block-index")
+        block_type = data.get("block-type")
+        stripe_index = data.get("stripe-index")
+        num_stripes = data.get("num-stripes")
+        num_chunks = data.get("num-chunks")
+        id = message.get("id")
 
-            random_bit_flip = random.randint(0, 100) < self.random_bit_flip
+        # Initialize file storage if needed
+        if filename not in self.files_data:
+            self.files_data[filename] = {}
 
-            stripe_data = self.files[file_name]["data"][stripe_number].copy()
-            stripe_type = self.files[file_name]["type"][stripe_number]
-            stripe_index = self.files[file_name]["block_index"][stripe_number]
-            n = self.files[file_name]["n"]
+        if stripe_index not in self.files_data[filename]:
+            self.files_data[filename][stripe_index] = {}
 
-            # Flip the first bit of the first chunk if random_bit_flip is True
-            print(f"🔄 Flipping bit: {random_bit_flip}")
-            if random_bit_flip and stripe_data and stripe_data[0] is not None:
-                # Decode the base64 chunk to bytes
-                try:
-                    decoded_chunk = base64.b64decode(stripe_data[0])
-                    if len(decoded_chunk) > 0:
-                        # Convert to bytearray to allow modification
-                        chunk_bytes = bytearray(decoded_chunk)
-
-                        # Pick a random byte in the chunk
-                        random_byte_index = random.randint(0, len(chunk_bytes) - 1)
-                        # Pick a random bit position (0-7)
-                        random_bit_position = random.randint(0, 7)
-
-                        # Flip the random bit
-                        chunk_bytes[random_byte_index] ^= 1 << random_bit_position
-
-                        # Re-encode back to base64
-                        stripe_data[0] = base64.b64encode(bytes(chunk_bytes)).decode(
-                            "utf-8"
-                        )
-                        print(
-                            f"✅ Flipped bit {random_bit_position} of byte {random_byte_index} in first chunk of stripe {stripe_number}"
-                        )
-                except Exception as e:
-                    print(f"❌ Error flipping bit: {e}")
-
-            for i in range(len(stripe_data)):
-                chunk = stripe_data[i]
-                block_type = stripe_type
-                block_index = stripe_index
-                total_chunks = len(stripe_data)
-                stripe_count = len(self.files[file_name]["data"])
-                # if random_bit_flip and chunck:
-                #     chunck = chunck[1:]
-
-                message = {
-                    "type": "read",
-                    "data": {
-                        "chunk": chunk,
-                        "chunk-index": i,
-                        "chunk-count": total_chunks,
-                        "block-type": block_type,
-                        "block-index": block_index,
-                        "stripe-number": stripe_number,
-                        "stripe-count": stripe_count,
-                        "n": n,
-                        "file-name": file_name,
-                    },
-                }
-                print(
-                    f"Reading chunk {i} of block {block_index} of type {block_type} for file {file_name}, stripe {stripe_number}"
-                )
-                self.send_with_command_port(message, addr)
-
-            message = {
-                "type": "read-complete",
-                "data": {
-                    "status": "success",
-                    "message": f"✅ Read block {stripe_number} for file {file_name} successfully",
-                    "file-name": file_name,
-                    "n": n,
-                },
-            }
-            self.send_with_command_port(message, addr)
-
-        except Exception as e:
-            print(f"❌ Error handling read message: {e}")
-            ack_message = {
-                "type": "read-ack",
-                "data": {"status": "error", "message": f"❌ Error reading block: {e}"},
-            }
-            self.send_with_command_port(ack_message, addr)
-
-    # ---------------------------------------------------------------
-
-    def send_to_manager(self, message):
-        """Send message to manager and return response"""
-        print(
-            f"📨 Sending {message.get('type')} message to manager address {self.manager_address[0]}:{self.manager_address[1]}"
-        )
-
-        self.manager_socket.sendto(json.dumps(message).encode(), self.manager_address)
-
-    def send_with_command_port(self, message, addr):
-        """Send message to command and return response"""
-        print(
-            f"📨 Sending {message.get('type')} message to command address {addr[0]}:{addr[1]}"
-        )
-
-        self.command_socket.sendto(json.dumps(message).encode(), addr)
-
-    # ---------------------------------------------------------------
-
-    def send_register_disk(self):
-        """Send register disk message to manager"""
-        message = {
-            "type": "register-disk",
-            "data": {
-                "disk-name": self.name,
-                "Ipv4": self.ip,
-                "m-port": self.m_port,
-                "c-port": self.c_port,
+        self.files_data[filename][stripe_index][block_index] = {
+            "chunks": [None] * num_chunks,  # Pre-allocate for indexed insertion
+            "expected_chunks": num_chunks,
+            "metadata": {
+                "block_type": block_type,
+                "stripe_index": stripe_index,
+                "num_stripes": num_stripes,
             },
         }
-        self.send_to_manager(message)
 
-    def send_deregister_disk(self):
-        """Send deregister disk message to manager"""
-        message = {"type": "deregister-disk", "data": {"disk-name": self.name}}
-        self.send_to_manager(message)
+        # Send immediate response
+        response = ok_response("copy-block", {}, id=id)
+        send_message(self.command_socket, addr, response)
 
-    # ---------------------------------------------------------------
+    def handle_copy_chunk(self, message, addr):
+        """Handle individual chunk of a block"""
+        data = message.get("data")
+        filename = data.get("file-name")
+        block_index = data.get("block-index")
+        stripe_index = data.get("stripe-index")
+        chunk_index = data.get("chunk-index")
+        chunk_data = data.get("chunk-data")
 
-    # ---------------------------------------------------------------
+        print(
+            f"Received chunk {chunk_index} for block {block_index} of file {filename} stripe {stripe_index}"
+        )
 
-    def start(self):
-        """Start the disk process"""
+        # Store the chunk using utility function
+        success = store_chunk(
+            self.files_data,
+            filename,
+            stripe_index,
+            block_index,
+            chunk_index,
+            chunk_data,
+        )
 
-        """Start both port handlers in separate threads"""
-        print(f"Starting disk process: {self.name}")
-        print(f"Manager port: {self.ip}:{self.m_port}")
-        print(f"Client port: {self.ip}:{self.c_port}")
-        print(f"Manager address: {self.manager_address[0]}:{self.manager_address[1]}")
-
-        # Create separate threads for each port
-        manager_thread = threading.Thread(target=self.handle_manager_port, daemon=True)
-        command_thread = threading.Thread(target=self.handle_command_port, daemon=True)
-
-        # Start both threads
-        manager_thread.start()
-        command_thread.start()
-
-        # Give threads time to start
-        time.sleep(0.5)
-
-        print("=" * 20)
-
-        # Register with manager
-        if self.running:
-            self.send_register_disk()
-        else:
+        if not success:
+            print(
+                f"❌ Received chunk for unknown block: {filename} stripe {stripe_index} block {block_index}"
+            )
             return
-
-        # Main command loop
-        try:
-            while self.running:
-                # Only show commands if disk is registered
-                if not self.registered:
-                    time.sleep(0.1)
-                    continue
-
-                """Print commands"""
-                print("\n" + "=" * 20)
-                print("Commands:")
-                print("1. deregister-disk and exit")
-                print("2. exit")
-                print("3. print files")
-                print("=" * 20)
-
-                command = input("Enter command: ").strip()
-
-                if command == "1":
-                    self.send_deregister_disk()
-                elif command == "2":
-                    break
-                elif command == "3":
-                    print("files: ", self.files["a.txt"])
-                else:
-                    print("❌ Invalid command")
-
-        except KeyboardInterrupt:
-            print("\n⚠️  Ctrl+C pressed, shutting down...")
-        finally:
-            print("🛑 Shutting down disk process...")
-            self.running = False
-            print("✅ Shutdown complete")
 
 
 def main():
-    """Main function to parse command line arguments and start the disk process"""
-
-    name = None
-    ip = "127.0.0.1"
-    m_port = 31501
-    c_port = 31502
-    ports = [31500, 31999]
-
-    manager_ip = "127.0.0.1"
-    manager_port = ports[0]
-
-    args = sys.argv[1:]
-    options = "hn:i:m:c:M:P:h"
-
-    try:
-        arguments, values = getopt.getopt(args, options)
-        for currentArg, currentVal in arguments:
-            if currentArg in ("-h", "--help"):
-                print(
-                    "Disk Process Help \n"
-                    " -n: Name of the disk (required) \n"
-                    " -i: IP address of the disk (default: 127.0.0.1) \n"
-                    " -m: M port of the disk (required) \n"
-                    " -c: C port of the disk (required) \n"
-                    " -M: IP address of the manager (default: 127.0.0.1) \n"
-                    " -P: Port of the manager (default: 31500) \n"
-                )
-                sys.exit(0)
-            elif currentArg in ("-n"):
-                name = currentVal
-            elif currentArg in ("-i"):
-                ip = currentVal
-            elif currentArg in ("-m"):
-                m_port = int(currentVal)
-            elif currentArg in ("-c"):
-                c_port = int(currentVal)
-            elif currentArg in ("-M"):
-                manager_ip = currentVal
-            elif currentArg in ("-P"):
-                manager_port = int(currentVal)
-    except getopt.error as err:
-        print(str(err))
-        sys.exit(1)
-
-        # Validate port ranges
-    if not (ports[0] <= m_port <= ports[1]):
-        print(f"❌ Error: m-port {m_port} must be in range {ports[0]}-{ports[1]}")
-        sys.exit(1)
-
-    if not (ports[0] <= c_port <= ports[1]):
-        print(f"❌ Error: c-port {c_port} must be in range {ports[0]}-{ports[1]}")
-        sys.exit(1)
-
-    if not (ports[0] <= manager_port <= ports[1]):
-        print(
-            f"❌ Error: manager-port {manager_port} must be in range {ports[0]}-{ports[1]}"
-        )
-        sys.exit(1)
-
-    if name is None or ip is None or m_port is None or c_port is None:
-        print("❌ Error: Missing a required argument")
-        sys.exit(1)
-
-    manager_address = (manager_ip, manager_port)
-
-    # Create and start disk process
+    name, ip, m_port, c_port, manager_address = disk_command_line_args()
     disk = DiskProcess(name, ip, m_port, c_port, manager_address)
     disk.start()
 
 
 if __name__ == "__main__":
+
     main()

@@ -4,574 +4,346 @@ import json
 import getopt
 import sys
 import random
+from utils import (
+    manager_command_line_args,
+    recieve_message,
+    send_message,
+    error_response,
+    ok_response,
+    check_striping_unit,
+)
 
 
 class ManagerProcess:
     def __init__(self, ip, port):
         self.ip = ip
         self.port = port
-        self.blocked = False
-        self.blocked_data = {}
 
         self.user_data = {}
         self.disk_data = {}
-        self.free_disks = []
+
+        self.free_disks = set()
+        self.used_ports = set()
+
         self.dss_data = {}
         self.file_data = {}
-        self.used_ports = set()
+
         self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.s.bind((self.ip, self.port))
 
     def start(self):
-        """Start the manager process"""
-        print(f"Starting manager process on {self.ip}:{self.port}")
-        print(f"Listening on {self.ip}:{self.port}")
-        print(f"Port range: 31500-31999")
-        print("=" * 20)
-
-        # Bind the socket to the IP and port provided
         with self.s:
-            self.s.bind((self.ip, self.port))
+            while True:
+                message, addr = recieve_message(self.s)
+                if message is None:
+                    continue
 
-            try:
-                while True:
-                    try:
-                        # Set timeout to allow checking self.running
-                        data = None
-                        self.s.settimeout(1.0)
-                        data, addr = self.s.recvfrom(1024)
-                        message = json.loads(data.decode())
-                        print(f"Manager received from {addr[0]}:{addr[1]}")
+                print(f"Received message from {addr}: {message}")
+                # Handle message here
 
-                        # Process manager messages
-                        if data:
-                            self.process_message(message, addr)
+                type, action = message.get("type"), message.get("action")
+                match type, action:
+                    case "request", "register-user":
+                        self.handle_register_user(message, addr)
+                    case "request", "deregister-user":
+                        self.handle_deregister_user(message, addr)
+                    case "request", "register-disk":
+                        self.handle_register_disk(message, addr)
+                    case "request", "deregister-disk":
+                        self.handle_deregister_disk(message, addr)
+                    case "request", "configure-dss":
+                        self.handle_configure_dss(message, addr)
+                    case "request", "copy-file":
+                        self.handle_copy_file(message, addr)
+                    case "request", "read-file":
+                        self.handle_read_file(message, addr)
+                    case _:
+                        print(f"❌ Unknown message ({type}, {action}) from {addr}")
 
-                    except socket.timeout:
-                        continue
-                    except Exception as e:
-                        print(f"❌ Manager port error: {e}")
-            except KeyboardInterrupt:
-                print("\nCtrl+C pressed, shutting down manager...")
-                print("Manager stopped cleanly")
+    def handle_read_file(self, message, addr):
+        data = message.get("data")
+        filename = data.get("file-name")
+        dss_name = data.get("dss-name")
+        owner = data.get("owner")
+        id = message.get("id")
 
-    def process_message(self, message, addr):
-        """Process messages received"""
-        print(f"Processing message of type {message.get('type', 'Unknown type')}")
-        try:
-            if self.blocked and message.get("type") != "copy-complete":
-                self.send_response(
-                    message.get("type"), "Copying in progress", addr, "failure"
-                )
-                return
+        print("Reading file")
 
-            match message.get("type"):
-                case "register-user":
-                    self.register_user(message, addr)
-                case "deregister-user":
-                    self.deregister_user(message, addr)
-                case "register-disk":
-                    self.register_disk(message, addr)
-                case "deregister-disk":
-                    self.deregister_disk(message, addr)
-                case "configure-dss":
-                    self.configure_dss(message, addr)
-                case "copy":
-                    self.copy(message, addr)
-                case "copy-complete":
-                    self.copy_complete(message, addr)
-                case "read":
-                    self.read(message, addr)
-                case "ls":
-                    self.ls(message, addr)
-                case "disk-failure":
-                    self.disk_failure(message, addr)
-                case _:
-                    print(f"unknown message type")
-                    self.send_response(
-                        message.get("type"), "Unknown message type", addr, "failure"
-                    )
-        except Exception as e:
-            print(f"❌ Error processing manager message: {e}")
-            self.send_response(
-                message.get("type"),
-                "Error processing manager message: " + str(e),
+        if dss_name not in self.dss_data:
+            print("No DSS configured")
+            send_message(
+                self.s,
                 addr,
-                "failure",
+                error_response("read-file", "No DSS configured", id=id),
             )
+            return
 
-    # ---------------------------------------------------------------
-
-    def disk_failure(self, message, addr):
-        """Handle disk failure"""
-        try:
-            data = message.get("data", {})
-            dss_name = data.get("dss-name")
-
-            if dss_name not in self.dss_data:
-                self.send_response("disk-failure-res", "DSS not found", addr, "failure")
-                return
-
-            # choose dss
-            dss_name = random.choice(list(self.dss_data.keys()))
-            dss_data = self.dss_data.get(dss_name)
-            res_data = {
-                "dss-name": dss_name,
-                "n": dss_data.get("n"),
-                "striping-unit": dss_data.get("striping-unit"),
-                "disks": [
-                    {
-                        "disk-name": self.disk_data[disk_name].get("disk-name"),
-                        "Ipv4": self.disk_data[disk_name].get("Ipv4"),
-                        "c-port": self.disk_data[disk_name].get("c-port"),
-                    }
-                    for disk_name in dss_data.get("disks", [])
-                ],
-            }
-            self.send_response(
-                "disk-failure-res", "Disk failure handled", addr, "success", res_data
-            )
-
-        except Exception as e:
-            print(f"❌ Error handling disk failure: {e}")
-            self.send_response(
-                "disk-failure-res",
-                "Error handling disk failure: " + str(e),
+        if filename not in self.file_data:
+            print("File does not exist:", filename)
+            send_message(
+                self.s,
                 addr,
-                "failure",
+                error_response("read-file", "File does not exist", id=id),
             )
+            return
 
-    def ls(self, message, addr):
-        """List all dss, and their files"""
-        try:
-            data = {
-                dss_name: list(dss_info.get("files", {}).keys())
-                for dss_name, dss_info in self.dss_data.items()
-            }
-            self.send_response("ls-res", "Listing all data", addr, "success", data)
-        except Exception as e:
-            print(f"❌ Error listing data: {e}")
-            self.send_response("ls", "Error listing data: " + str(e), addr, "failure")
-
-    def copy_complete(self, message, addr):
-        """Copy complete"""
-
-        dss_data = self.dss_data.get(self.blocked_data.get("dss-name"))
-        dss_data.get("files")[self.blocked_data.get("file-data").get("file-name")] = (
-            self.blocked_data.get("file-data")
-        )
-
-        self.blocked = False
-        self.send_response("copy-complete", "Copy complete", addr, "success")
-
-    def read(self, message, addr):
-        try:
-            data = message.get("data")
-            dss_name = data.get("dss-name")
-            file_name = data.get("file-name")
-            user_name = data.get("user-name")
-
-            if dss_name not in self.dss_data:
-                print(f"❌ DSS not found: {dss_name}")
-                self.send_response("read", "DSS not found", addr, "failure")
-                return
-
-            if file_name not in self.dss_data[dss_name]["files"]:
-                print(f"❌ File not found: {file_name}")
-                self.send_response("read", "File not found", addr, "failure")
-                return
-
-            print(self.dss_data)
-            if user_name not in self.dss_data[dss_name]["files"][file_name]["owner"]:
-                print(f"❌ User not found: {user_name}")
-                self.send_response(
-                    "read", "User not owner of requested file", addr, "failure"
-                )
-                return
-
-            read_data = {
-                "file-name": file_name,
-                "file-size": self.dss_data[dss_name]["files"][file_name]["file-size"],
-                "dss-name": dss_name,
-                "n": self.dss_data[dss_name]["n"],
-                "striping-unit": self.dss_data[dss_name]["striping-unit"],
-                "disks": [
-                    {
-                        "disk-name": self.disk_data[disk_name].get("disk-name"),
-                        "Ipv4": self.disk_data[disk_name].get("Ipv4"),
-                        "c-port": self.disk_data[disk_name].get("c-port"),
-                    }
-                    for disk_name in self.dss_data[dss_name].get("disks", [])
-                ],
-            }
-
-            self.send_response("read", "File found", addr, "success", read_data)
-        except Exception as e:
-            print(f"❌ Error reading file: {e}")
-            self.send_response("read", "Error reading file: " + str(e), addr, "failure")
-
-    def configure_dss(self, message, addr):
-        """Configure a DSS"""
-        try:
-            # check if DSS already exists
-            if message.get("data", {}).get("dss-name") in self.dss_data:
-                print(
-                    f"❌ DSS already exists: {message.get('data', {}).get('dss-name')}"
-                )
-                self.send_response(
-                    "configure-dss", "DSS already exists", addr, "failure"
-                )
-                return
-
-            # check if n and striping-unit are numbers
-            try:
-                n = (int)(message.get("data").get("n"))
-                striping_unit = (int)(message.get("data").get("striping-unit"))
-            except:
-                print(
-                    f"❌ Invalid n: {message.get('data').get('n')} (must be a number)"
-                )
-                self.send_response(
-                    "configure-dss",
-                    "Invalid n or striping-unit type: must be a number",
-                    addr,
-                    "failure",
-                )
-                return
-
-            # check number of free disks
-            if len(self.free_disks) < n:
-                print(f"❌ Not enough free disks to configure the DSS")
-                self.send_response(
-                    "configure-dss",
-                    "Not enough free disks to configure the DSS",
-                    addr,
-                    "failure",
-                )
-                return
-
-            # check if n is a number and a valid number
-            if n < 3:
-                print(
-                    f"❌ Invalid n: {message.get('data').get('n')} (must be greater than 2 and a number)"
-                )
-                self.send_response(
-                    "configure-dss",
-                    "Invalid n: "
-                    + str(message.get("data").get("n"))
-                    + " (must be greater than 2 and a number)",
-                    addr,
-                    "failure",
-                )
-                return
-
-            # check if striping-unit is a power of 2 between 128 and 1048576 bytes
-            if (
-                striping_unit < 128
-                or striping_unit > 1048576
-                or striping_unit & (striping_unit - 1) != 0
-            ):
-                print(
-                    f"❌ Invalid striping-unit: {message.get('data').get('striping-unit')} (must be a power of 2 between 128 and 1048576 bytes)"
-                )
-                self.send_response(
-                    "configure-dss",
-                    "Invalid striping-unit: "
-                    + str(message.get("data").get("striping-unit"))
-                    + " (must be a power of 2 between 128 and 1048576 bytes)",
-                    addr,
-                    "failure",
-                )
-                return
-
-            # add DSS data
-            self.dss_data[message.get("data").get("dss-name")] = {
-                "disks": [],
-                "files": {},
-                "striping-unit": striping_unit,
-                "n": n,
-            }
-
-            # pop n disks from the free disks
-            for _ in range(n):
-                disk_name = self.free_disks.pop(0)
-                self.disk_data[disk_name]["inDSS"] = True
-                self.dss_data[message.get("data").get("dss-name")]["disks"].append(
-                    disk_name
-                )
-
-            # send response to DSS's m-port
-            print(
-                f"✅ DSS {message.get('data').get('dss-name')} configured successfully"
-            )
-            self.send_response(
-                "configure-dss", "DSS configured successfully", addr, "success"
-            )
-
-        except Exception as e:
-            print(f"❌ Error configuring DSS: {e}")
-            self.send_response(
-                "configure-dss", "Error configuring DSS: " + str(e), addr, "failure"
-            )
-
-    def register_user(self, message, addr):
-        """Register a user"""
-        try:
-            # check if user already exists
-            if message.get("data", {}).get("user-name") in self.user_data:
-                print(
-                    f"❌ User already exists: {message.get('data', {}).get('user-name')}"
-                )
-                self.send_response(
-                    "register-user", "User already exists", addr, "failure"
-                )
-                return
-
-            # check if port is already in use
-            ports = [
-                message.get("data", {}).get("m-port"),
-                message.get("data", {}).get("c-port"),
-            ]
-            for port in ports:
-                if port in self.used_ports:
-                    print(f"❌ Port already in use: {port}")
-                    self.send_response(
-                        "register-user",
-                        "One of the ports is already in use",
-                        addr,
-                        "failure",
-                    )
-                    return
-
-            # Add user data and track ports
-            user_data = message.get("data", {})
-            self.user_data[user_data.get("user-name")] = user_data
-            self.used_ports.add(user_data.get("m-port"))
-            self.used_ports.add(user_data.get("c-port"))
-
-            print(
-                f"✅ User {message.get('data', {}).get('user-name')} registered successfully"
-            )
-            self.send_response(
-                "register-user", "User registered successfully", addr, "success"
-            )
-        except Exception as e:
-            print(f"❌ Error registering user: {e}")
-            self.send_response(
-                "register-user", "Error registering user: " + str(e), addr, "failure"
-            )
-
-    def deregister_user(self, message, addr):
-        """Deregister a user"""
-        try:
-            user_name = message.get("data", {}).get("user-name")
-
-            if user_name not in self.user_data:
-                print(f"❌ User {user_name} not found")
-                self.send_response(
-                    "deregister-user", f"User {user_name} not found", addr, "failure"
-                )
-                return
-
-            # Remove user and free up ports
-            user_data = self.user_data[user_name]
-
-            self.used_ports.discard(user_data.get("m-port"))
-            self.used_ports.discard(user_data.get("c-port"))
-            self.user_data.pop(user_name)
-
-            # send response to user's m-port
-            print(f"✅ User {user_name} deregistered successfully")
-            self.send_response(
-                "deregister-user", "User deregistered successfully", addr, "success"
-            )
-        except Exception as e:
-            print(f"❌ Error deregistering user: {e}")
-            self.send_response(
-                "deregister-user",
-                "Error deregistering user: " + str(e),
+        if owner not in self.file_data[filename].get("owner", []):
+            print("User does not own the file:", owner)
+            send_message(
+                self.s,
                 addr,
-                "failure",
+                error_response("read-file", "User does not own the file", id=id),
             )
+            return
 
-    def register_disk(self, message, addr):
-        """Register a disk"""
-        try:
-            # check if disk already exists
-            if message.get("data", {}).get("disk-name") in self.disk_data:
-                print(
-                    f"❌ Disk already exists: {message.get('data', {}).get('disk-name')}"
-                )
-                self.send_response(
-                    "register-disk", "Disk already exists", addr, "failure"
-                )
-                return
+        file_info = self.file_data[filename]
+        dss_name = file_info.get("dss")
+        disks = file_info.get("disks")
+        striping_unit = file_info.get("striping_unit")
+        num_disks = file_info.get("num_disks")
+        size = file_info.get("size")
 
-            # check if port is already in use
-            ports = [
-                message.get("data", {}).get("m-port"),
-                message.get("data", {}).get("c-port"),
-            ]
-            for port in ports:
-                if port in self.used_ports:
-                    print(f"❌ Port already in use: {port}")
-                    self.send_response(
-                        "register-disk",
-                        "One of the ports is already in use",
-                        addr,
-                        "failure",
-                    )
-                    return
+        disk_info = [self.disk_data[disk] for disk in disks]
 
-            # add disk data and track ports
-            disk_data = message.get("data", {})
-            self.disk_data[disk_data.get("disk-name")] = disk_data
-            self.used_ports.add(disk_data.get("m-port"))
-            self.used_ports.add(disk_data.get("c-port"))
-            self.free_disks.append(disk_data.get("disk-name"))
-
-            # send response to disk's m-port
-            print(
-                f"✅ Disk {message.get('data', {}).get('disk-name')} registered successfully"
-            )
-            self.send_response(
-                "register-disk", "Disk registered successfully", addr, "success"
-            )
-        except Exception as e:
-            print(f"❌ Error registering disk: {e}")
-            self.send_response(
-                "register-disk", "Error registering disk: " + str(e), addr, "failure"
-            )
-
-    def deregister_disk(self, message, addr):
-        """Deregister a disk"""
-        try:
-
-            disk_name = message.get("data", {}).get("disk-name")
-            if disk_name not in self.disk_data:
-                print(f"❌ Disk {disk_name} not found")
-                self.send_response(
-                    "deregister-disk", f"Disk {disk_name} not found", addr, "failure"
-                )
-                return
-
-            if disk_name not in self.free_disks:
-                print(f"❌ Disk {disk_name} not in free disks")
-                self.send_response(
-                    "deregister-disk",
-                    f"Disk {disk_name} is being used in a DSS",
-                    addr,
-                    "failure",
-                )
-                return
-
-            # remove disk data and track ports
-            self.disk_data.pop(disk_name)
-            self.used_ports.discard(message.get("data", {}).get("m-port"))
-            self.used_ports.discard(message.get("data", {}).get("c-port"))
-            self.free_disks.remove(disk_name)
-
-            print(f"✅ Disk {disk_name} deregistered successfully")
-            self.send_response(
-                "deregister-disk", "Disk deregistered successfully", addr, "success"
-            )
-        except Exception as e:
-            print(f"❌ Error deregistering disk: {e}")
-            self.send_response(
-                "deregister-disk",
-                "Error deregistering disk: " + str(e),
-                addr,
-                "failure",
-            )
-
-    def copy(self, message, addr):
-        """Copy a file to the DSS"""
-        try:
-
-            # choose dss
-            if len(self.dss_data) == 0:
-                print(f"❌ No DSSs available")
-                self.send_response("copy", "No DSSs available", addr, "failure")
-                return
-
-            # choose dss
-            dss_name = random.choice(list(self.dss_data.keys()))
-            dss_data = self.dss_data.get(dss_name)
-            res_data = {
-                "dss-name": dss_name,
-                "n": dss_data.get("n"),
-                "striping-unit": dss_data.get("striping-unit"),
-                "disks": [
-                    {
-                        "disk-name": self.disk_data[disk_name].get("disk-name"),
-                        "Ipv4": self.disk_data[disk_name].get("Ipv4"),
-                        "c-port": self.disk_data[disk_name].get("c-port"),
-                    }
-                    for disk_name in dss_data.get("disks", [])
-                ],
-                **message.get("data", {}),
-            }
-            self.send_response("copy", "DSS chosen", addr, "success", res_data)
-            self.blocked = True
-            self.blocked_data["file-data"] = message.get("data", {})
-            self.blocked_data["dss-name"] = dss_name
-
-        except Exception as e:
-            print(f"❌ Error copying file: {e}")
-            self.send_response("copy", "Error copying file: " + str(e), addr, "failure")
-
-    # ---------------------------------------------------------------
-
-    def send_response(self, type, message_text, addr, status, data={}):
-        """Send a response to process"""
-        response = {
-            "type": type,
-            "data": {
-                "status": status,
-                "message": (
-                    "✅ " + message_text
-                    if status == "success"
-                    else "❌ " + message_text
-                ),
-                "data": data,
-            },
+        data = {
+            "num_disks": num_disks,
+            "striping_unit": striping_unit,
+            "disks": disk_info,
+            "file-size": size,
         }
-        print(f"Sending response to {addr[0]}:{addr[1]}")
-        # print(f"   Response: {json.dumps(response, indent=2)}")
-        print("=" * 20)
-        self.s.sendto(json.dumps(response).encode(), addr)
+        send_message(self.s, addr, ok_response("read-file", data, id=id))
+
+    def handle_copy_file(self, message, addr):
+        data = message.get("data")
+        owner = data.get("owner")
+        filename = data.get("file-name")
+        file_size = data.get("file-size")
+        id = message.get("id")
+
+        print("Copying file")
+
+        if not self.dss_data:
+            print("No DSS configured")
+            send_message(
+                self.s,
+                addr,
+                error_response("copy-file", "No DSS configured", id=id),
+            )
+            return
+
+        dss_name, dss_info = random.choice(list(self.dss_data.items()))
+        num_disks = dss_info.get("num_disks")
+        striping_unit = dss_info.get("striping_unit")
+        disks = dss_info.get("disks")
+        disk_info = [self.disk_data[disk] for disk in disks]
+
+        if filename in self.file_data:
+            print("File already exists:", filename)
+            send_message(
+                self.s,
+                addr,
+                error_response("copy-file", "File already exists", id=id),
+            )
+            return
+
+        data = {
+            "num_disks": num_disks,
+            "striping_unit": striping_unit,
+            "disks": disk_info,
+        }
+        send_message(self.s, addr, ok_response("copy-file", data, id=id))
+
+        while True:
+            message, addr = recieve_message(self.s, timeout=5)
+            if message is None:
+                continue
+            if (
+                message.get("type") == "response"
+                and message.get("action") == "copy-complete"
+            ):
+                break
+            else:
+                send_message(
+                    self.s,
+                    addr,
+                    error_response(
+                        message.get("action"),
+                        "No operations during copy-file",
+                        id=message.get("id"),
+                    ),
+                )
+            print("File copy complete")
+
+        self.file_data[filename] = {
+            "dss": dss_name,
+            "disks": disks,
+            "striping_unit": striping_unit,
+            "num_disks": num_disks,
+            "size": file_size,
+        }
+        dss_info["files"][filename] = self.file_data[filename]
+
+        send_message(self.s, addr, ok_response("copy-file", {}, id=id))
+
+    def handle_configure_dss(self, message, addr):
+        data = message.get("data")
+        name = data.get("name")
+        num_disks = data.get("num_disks")
+        striping_unit = data.get("striping_unit")
+        id = message.get("id")
+
+        print("Configuring DSS")
+
+        if len(self.free_disks) < num_disks:
+            print("not enough disks to configure dss")
+            send_message(
+                self.s, addr, error_response("configure-dss", "not enough disks", id=id)
+            )
+            return
+
+        if not check_striping_unit(striping_unit):
+            print("striping unit not valid")
+            send_message(
+                self.s,
+                addr,
+                error_response("configure-dss", "striping unit not valid", id=id),
+            )
+            return
+
+        if name in self.dss_data:
+            print("dss name already exists")
+            send_message(
+                self.s,
+                addr,
+                error_response("configure-dss", "dss name already exists", id=id),
+            )
+            return
+
+        selected_disks = random.sample(list(self.free_disks), num_disks)
+        self.dss_data[name] = {
+            "disks": selected_disks,
+            "striping_unit": striping_unit,
+            "num_disks": num_disks,
+            "files": {},
+        }
+        send_message(self.s, addr, ok_response("configure-dss", {}, id=id))
+
+    def handle_register_disk(self, message, addr):
+        data = message.get("data")
+        name = data.get("name")
+        c_port = data.get("c_port")
+        m_port = data.get("m_port")
+        id = message.get("id")
+
+        print("Registing disk")
+
+        if name in self.disk_data:
+            print("Disk already exists:", name)
+            send_message(
+                self.s,
+                addr,
+                error_response("register-disk", "Disk already exists", id=id),
+            )
+            return
+
+        if m_port in self.used_ports or c_port in self.used_ports:
+            print("One of the ports is already registered as in use")
+            send_message(
+                self.s,
+                addr,
+                error_response(
+                    "register-disk", "One of the ports is already in use", id=id
+                ),
+            )
+            return
+
+        self.disk_data[name] = data
+        self.used_ports.add(c_port)
+        self.used_ports.add(m_port)
+        self.free_disks.add(name)
+        send_message(self.s, addr, ok_response("register-disk", {}, id=id))
+
+    def handle_deregister_disk(self, message, addr):
+        data = message.get("data")
+        name = data.get("name")
+        id = message.get("id")
+
+        print("De-Registering disk")
+
+        if name not in self.disk_data:
+            print("Disk doesnt exists:", name)
+            send_message(
+                self.s,
+                addr,
+                error_response("deregister-disk", "Disk doesnt exist", id=id),
+            )
+            return
+
+        disk = self.disk_data.pop(name)
+        self.used_ports.remove(disk.get("c_port"))
+        self.used_ports.remove(disk.get("m_port"))
+        send_message(self.s, addr, ok_response("deregister-disk", {}, id=id))
+        print("de-register successfuly")
+
+    def handle_register_user(self, message, addr):
+        data = message.get("data")
+        name = data.get("name")
+        c_port = data.get("c_port")
+        m_port = data.get("m_port")
+        id = message.get("id")
+
+        print("Registing user")
+
+        if name in self.user_data:
+            print("User already exists:", name)
+            send_message(
+                self.s,
+                addr,
+                error_response("register-user", "User already exists", id=id),
+            )
+            return
+
+        if m_port in self.used_ports or c_port in self.used_ports:
+            print("One of the ports is already registered as in use")
+            send_message(
+                self.s,
+                addr,
+                error_response(
+                    "register-user", "One of the ports is already in use", id=id
+                ),
+            )
+            return
+
+        self.user_data[name] = data
+        self.used_ports.add(c_port)
+        self.used_ports.add(m_port)
+        send_message(self.s, addr, ok_response("register-user", {}, id=id))
+
+    def handle_deregister_user(self, message, addr):
+        data = message.get("data")
+        name = data.get("name")
+        id = message.get("id")
+
+        print("De-Registering user")
+
+        if name not in self.user_data:
+            print("User doesnt exists:", name)
+            send_message(
+                self.s,
+                addr,
+                error_response("deregister-user", "User doesnt exist", id=id),
+            )
+            return
+
+        user = self.user_data.pop(name)
+        self.used_ports.remove(user.get("c_port"))
+        self.used_ports.remove(user.get("m_port"))
+        send_message(self.s, addr, ok_response("deregister-user", {}, id=id))
+        print("de-register successfuly")
 
 
 def main():
-    """Main function to parse command line arguments and start the manager process"""
-
-    ip = "127.0.0.1"
-    port = 31500
-
-    args = sys.argv[1:]
-    options = "hi:p:h"
-
-    try:
-        arguments, values = getopt.getopt(args, options)
-        for currentArg, currentVal in arguments:
-            if currentArg in ("-h", "--help"):
-                print(
-                    "Manager Process Help \n"
-                    " -i: IP address to bind the manager to (default: 127.0.0.1) \n"
-                    " -p: Port number to bind the manager to (default: 31500) \n"
-                )
-                sys.exit(0)
-    except getopt.error as err:
-        print(str(err))
-        sys.exit(1)
-
-    if ip is None or port is None:
-        print("❌ Error: Missing required arguments:")
-        sys.exit(1)
-
-    if not (31500 <= port <= 31999):
-        print(f"❌ Error: Port {port} must be in range 31500-31999")
-        sys.exit(1)
-
+    ip, port = manager_command_line_args()
     manager = ManagerProcess(ip, port)
     manager.start()
 

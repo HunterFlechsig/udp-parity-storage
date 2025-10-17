@@ -13,11 +13,11 @@ from utils import (
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
     send_message(
         s,
-        ("127.0.0.1", 5000),
+        ("127.0.0.1", 31500),
         ok_request(
             "configure-dss",
             {
-                "name": "my_dss",
+                "name": "d",
                 "num_disks": 3,
                 "striping_unit": 1024,
             },

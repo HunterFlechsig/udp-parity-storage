@@ -7,6 +7,7 @@
 import socket
 import threading
 import sys
+import random
 from utils import (
     recieve_message,
     disk_command_line_args,
@@ -16,8 +17,8 @@ from utils import (
     check_ok,
     ThreadEvents,
     generate_id,
-    store_chunk,
 )
+from time import sleep
 
 
 def print_commands():
@@ -42,6 +43,7 @@ class DiskProcess:
 
         self.files_data = {}
         self.events = ThreadEvents()
+        self.p = 10  # Probability percentage for corruption
         self.register_user()
 
     def register_user(self):
@@ -156,14 +158,108 @@ class DiskProcess:
                 self.events.set_event(id, message)
                 continue
 
+            print(f"🔵 Received message: type={type}, action={action}")
+
             match type, action:
                 case "request", "copy-block":
                     self.handle_copy_block(message, addr)
-
                 case "request", "copy-chunk":
-                    self.handle_copy_chunk(message, addr)
+                    self.handle_store_chunk(message, addr)
+                case "request", "read-block":
+                    self.handle_read_block(message, addr)
+                case "request", "read-chunks":
+                    self.handle_read_chunks(message, addr)
+                case "request", "fail":
+                    self.handle_fail_disk(message, addr)
                 case _:
                     print(f"❌ Unknown message ({type}, {action}) from client")
+
+    def handle_fail_disk(self, message, addr):
+        """Handle fail-disk request"""
+        print(f"💥 Simulating disk failure - clearing all files")
+
+        # Simulate disk failure by clearing the file's data
+        self.files_data = {}
+
+        response = ok_response(
+            "fail",
+            {},
+            id=id,
+        )
+        send_message(self.command_socket, addr, response)
+
+    def handle_read_block(self, message, addr):
+        """Handle read-block request"""
+        data = message.get("data")
+        filename = data.get("file-name")
+        stripe_index = data.get("stripe-index")
+        id = message.get("id")
+
+        block_info = self.files_data[filename][stripe_index]
+        response = ok_response(
+            "read-block",
+            {
+                "block-type": block_info["block_type"],
+                "num-chunks": len(block_info["chunks"]),
+                "file-name": filename,
+                "block-index": block_info["block_index"],
+            },
+            id=id,
+        )
+        send_message(self.command_socket, addr, response)
+
+    def handle_read_chunks(self, message, addr):
+        """Handle read-chunks request - send all chunks for a block"""
+        data = message.get("data")
+        filename = data.get("file-name")
+        stripe_index = data.get("stripe-index")
+        block_index = data.get("block-index")
+        finish_id = data.get("finish-id")
+
+        block_info = self.files_data[filename][stripe_index]
+
+        print(
+            f"📤 Sending {len(block_info['chunks'])} chunks for stripe {stripe_index}"
+        )
+
+        for chunk_index, chunk_data in enumerate(block_info["chunks"]):
+            # Randomly flip a bit in the first chunk with 10% probability
+            data_to_send = chunk_data
+            if chunk_index == 0 and random.random() < self.p / 100:
+                # Convert to bytearray to modify
+                corrupted_data = bytearray(chunk_data)
+                if len(corrupted_data) > 0:
+                    # Pick a random byte and bit position
+                    byte_pos = random.randint(0, len(corrupted_data) - 1)
+                    bit_pos = random.randint(0, 7)
+                    # Flip the bit
+                    corrupted_data[byte_pos] ^= 1 << bit_pos
+                    data_to_send = bytes(corrupted_data)
+                    print(
+                        f"🔥 CORRUPTED: Flipped bit {bit_pos} in byte {byte_pos} of first chunk"
+                    )
+
+            chunk_response = ok_response(
+                "read-chunk",
+                {
+                    "file-name": filename,
+                    "block-index": block_index,  # Echo back block_index so user knows where to store
+                    "chunk-index": chunk_index,
+                    "chunk-data": list(data_to_send) if data_to_send else [],
+                    "finish-id": finish_id,
+                },
+                id=generate_id(),
+            )
+            send_message(self.command_socket, addr, chunk_response)
+
+        # Send finish notification
+        finish_response = ok_response(
+            "read-chunks",
+            {},
+            id=finish_id,
+        )
+        send_message(self.command_socket, addr, finish_response)
+        print(f"✅ Sent all chunks for stripe {stripe_index}")
 
     def handle_copy_block(self, message, addr):
         """Handle initial copy-block request - sets up for receiving chunks"""
@@ -172,9 +268,12 @@ class DiskProcess:
         block_index = data.get("block-index")
         block_type = data.get("block-type")
         stripe_index = data.get("stripe-index")
-        num_stripes = data.get("num-stripes")
         num_chunks = data.get("num-chunks")
         id = message.get("id")
+
+        print(
+            f"📦 Received copy-block: file={filename}, stripe={stripe_index}, block={block_index}, type={block_type}, chunks={num_chunks}"
+        )
 
         # Initialize file storage if needed
         if filename not in self.files_data:
@@ -183,48 +282,43 @@ class DiskProcess:
         if stripe_index not in self.files_data[filename]:
             self.files_data[filename][stripe_index] = {}
 
-        self.files_data[filename][stripe_index][block_index] = {
-            "chunks": [None] * num_chunks,  # Pre-allocate for indexed insertion
-            "expected_chunks": num_chunks,
-            "metadata": {
-                "block_type": block_type,
-                "stripe_index": stripe_index,
-                "num_stripes": num_stripes,
-            },
+        self.files_data[filename][stripe_index] = {
+            "chunks": [None] * num_chunks,
+            "block_type": block_type,
+            "block_index": block_index,
+            "stripe_index": stripe_index,
         }
+
+        print(f"✅ Initialized storage for {num_chunks} chunks")
 
         # Send immediate response
         response = ok_response("copy-block", {}, id=id)
         send_message(self.command_socket, addr, response)
 
-    def handle_copy_chunk(self, message, addr):
-        """Handle individual chunk of a block"""
+    def handle_store_chunk(self, message, addr):
+        """Handle store-chunk request"""
         data = message.get("data")
         filename = data.get("file-name")
-        block_index = data.get("block-index")
         stripe_index = data.get("stripe-index")
         chunk_index = data.get("chunk-index")
         chunk_data = data.get("chunk-data")
 
+        # Store the chunk data
+        self.files_data[filename][stripe_index]["chunks"][chunk_index] = bytes(
+            chunk_data
+        )
+
+        # Count how many chunks have been received
+        total_chunks = len(self.files_data[filename][stripe_index]["chunks"])
+        received_chunks = sum(
+            1
+            for c in self.files_data[filename][stripe_index]["chunks"]
+            if c is not None
+        )
+
         print(
-            f"Received chunk {chunk_index} for block {block_index} of file {filename} stripe {stripe_index}"
+            f"📥 Chunk {chunk_index} received for stripe {stripe_index} ({received_chunks}/{total_chunks} chunks complete)"
         )
-
-        # Store the chunk using utility function
-        success = store_chunk(
-            self.files_data,
-            filename,
-            stripe_index,
-            block_index,
-            chunk_index,
-            chunk_data,
-        )
-
-        if not success:
-            print(
-                f"❌ Received chunk for unknown block: {filename} stripe {stripe_index} block {block_index}"
-            )
-            return
 
 
 def main():

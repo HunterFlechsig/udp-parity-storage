@@ -20,10 +20,12 @@ from utils import (
     calculate_num_stripes,
     calculate_parity,
     split_block_into_chunks,
-    store_chunk,
-    calculate_num_chunks,
+    check_parity,
+    construct_read_file,
+    compare_files,
 )
 import os
+import random
 
 
 def print_commands():
@@ -32,6 +34,7 @@ def print_commands():
     print("2. configure-dss     - configure a distributed storage system")
     print("3. copy-file         - copy a file to the distributed storage system")
     print("4. read-file         - read a file from the distributed storage system")
+    print("5. disk-failure      - simulate a disk failure")
 
 
 class UserProcess:
@@ -204,8 +207,9 @@ class UserProcess:
                         block = next(reader)
                         blocks_data.append(block)
                     except StopIteration:
-                        print(f"⚠️  Unexpected end of file at stripe {stripe_index}")
-                        break
+                        # End of file reached - pad remaining blocks with nulls
+                        null_block = b"\x00" * striping_unit
+                        blocks_data.append(null_block)
 
                 # If we didn't get any blocks, we're done
                 if not blocks_data:
@@ -274,70 +278,55 @@ class UserProcess:
         filename,
         disk,
     ):
-        try:
-            # Use c_port (with underscore) as that's what the manager sends
-            disk_addr = (disk.get("ip"), disk.get("c_port"))
-            id = generate_id()
-            chunks = split_block_into_chunks(block_data)
-            event = self.events.add_event(id)
+        disk_addr = (disk.get("ip"), disk.get("c_port"))
+        id = generate_id()
+        event = self.events.add_event(id)
+        chunks = split_block_into_chunks(block_data)
+        send_message(
+            self.command_socket,
+            disk_addr,
+            ok_request(
+                "copy-block",
+                {
+                    "file-name": filename,
+                    "block-index": block_index,
+                    "block-type": block_type,
+                    "stripe-index": stripe_index,
+                    "num-stripes": num_stripes,
+                    "num-chunks": len(chunks),
+                },
+                id=id,
+            ),
+        )
+        event.wait()
+        response = self.events.get_event_data(id)
+
+        if response is None or not check_ok(response, "response", "copy-block"):
+            print(
+                f"❌ Error sending block {block_index} of file '{filename}' to disk {disk.get('name')}"
+            )
+            return
+
+        for chunk_index, chunk in enumerate(chunks):
+            chunk_id = generate_id()
             send_message(
                 self.command_socket,
                 disk_addr,
                 ok_request(
-                    "copy-block",
+                    "copy-chunk",
                     {
                         "file-name": filename,
-                        "block-index": block_index,
-                        "block-type": block_type,
                         "stripe-index": stripe_index,
-                        "num-stripes": num_stripes,
-                        "num-chunks": len(chunks),
+                        "chunk-index": chunk_index,
+                        "chunk-data": list(chunk),
                     },
-                    id=id,
+                    id=chunk_id,
                 ),
             )
-            event.wait()
-            response = self.events.get_event_data(id)
 
-            if response is None:
-                print(
-                    f"❌ Store block timeout - no response from disk {disk.get('name')} for block {block_index}"
-                )
-                return
-
-            if not check_ok(response, "response", "copy-block"):
-                print(
-                    f"❌ Store block unsuccessful from disk {disk.get('name')} for block {block_index}: ",
-                    response.get("error"),
-                )
-                return
-
-            # Send all chunks for this block (each chunk gets its own ID)
-            for chunk_index, chunk in enumerate(chunks):
-                chunk_id = generate_id()
-                send_message(
-                    self.command_socket,
-                    disk_addr,
-                    ok_request(
-                        "copy-chunk",
-                        {
-                            "file-name": filename,
-                            "block-index": block_index,
-                            "stripe-index": stripe_index,
-                            "chunk-index": chunk_index,
-                            "chunk-data": list(chunk),
-                        },
-                        id=chunk_id,
-                    ),
-                )
-
-            print(f"✅ Sent block {block_index} ({block_type}) to {disk.get('name')}")
-
-        except Exception as e:
-            print(
-                f"❌ Error sending block {block_index} to disk {disk.get('name')}: {e}"
-            )
-            return
+        print(
+            f"✅ Sent block {block_index} ({block_type}) of file '{filename}' to disk {disk.get('name')}"
+        )
 
     def read_file(self):
         try:
@@ -374,41 +363,256 @@ class UserProcess:
             file_size = message_data.get("file-size")
             num_disks = message_data.get("num_disks")
             striping_unit = message_data.get("striping_unit")
+            disks = message_data.get("disks", [])
             num_stripes = calculate_num_stripes(file_size, striping_unit, num_disks)
 
-            print(f"📋 Reading file: {filename} ({file_size} bytes)")
-
-            # Initialize file storage structure
-            if filename not in self.files_data:
-                self.files_data[filename] = {}
-
-            # Initialize storage for each stripe and block
-            for stripe_index in range(num_stripes):
-                if stripe_index not in self.files_data[filename]:
-                    self.files_data[filename][stripe_index] = {}
-
-                # Initialize storage for each block in this stripe (num_disks blocks per stripe)
-                for block_index in range(num_disks):
-                    # Calculate number of chunks per block (assuming same chunk size as sending)
-                    num_chunks = calculate_num_chunks(striping_unit)
-
-                    self.files_data[filename][stripe_index][block_index] = {
-                        "chunks": [None] * num_chunks,  # Pre-allocated list
-                        "expected_chunks": num_chunks,
-                        "metadata": {
-                            "block_type": "unknown",  # Will be determined when reading
-                            "stripe_index": stripe_index,
-                            "num_stripes": num_stripes,
-                        },
-                    }
-
-            print(
-                f"✅ Initialized storage for {num_stripes} stripes, {num_disks} blocks per stripe"
+            all_stripe_data = self.read_file_2(
+                filename, file_size, num_stripes, disks, num_disks
             )
+
+            print(f"\n✅ File '{filename}' read completed")
+
+            # Write the reconstructed file
+            construct_read_file("./files-read", filename, all_stripe_data, file_size)
+            compare_files(f"./files-copy/{filename}", f"./files-read/{filename}")
 
         except Exception as e:
             print(f"❌ Error reading file: {e}")
             return
+
+    def read_file_2(self, filename, file_size, num_stripes, disks, num_disks):
+        print(f"📋 Reading file: {filename} ({file_size} bytes)")
+        self.files_data[filename] = {}
+
+        # List to store all stripe data for file reconstruction
+        all_stripe_data = []
+
+        for stripe_index in range(num_stripes):
+            print(f"\n📦 Reading stripe {stripe_index + 1}/{num_stripes}")
+            data_incorrect = True
+            while data_incorrect:
+                stripe_blocks = {}  # Use dictionary, not list
+                threads = []
+
+                for disk_index, disk in enumerate(disks):
+                    t = threading.Thread(
+                        target=self.read_block,
+                        args=(
+                            disk,
+                            stripe_index,
+                            filename,
+                            disk_index,
+                            stripe_blocks,  # Pass dict to store result
+                        ),
+                    )
+                    t.start()
+                    threads.append(t)
+
+                for t in threads:
+                    t.join()
+
+                # Separate parity block from data blocks
+                parity_block = None
+                data_blocks_dict = {}  # Use dict to track block_index -> block_data
+                parity_disk_index = None
+
+                for disk_idx, block_info in stripe_blocks.items():
+                    if block_info is None:
+                        print(f"⚠️  Block from disk {disk_idx} is None")
+                        continue
+                    block_data, block_type, block_index = block_info
+                    if block_type == "parity":
+                        parity_block = block_data
+                        parity_disk_index = disk_idx
+                    else:
+                        data_blocks_dict[block_index] = block_data
+
+                # Sort data blocks by block_index to maintain correct order
+                data_blocks = [
+                    data_blocks_dict[i] for i in sorted(data_blocks_dict.keys())
+                ]
+
+                # Check if we have all blocks
+                if parity_block is None or len(data_blocks) != num_disks - 1:
+                    print(f"❌ Missing blocks for stripe {stripe_index}, retrying...")
+                    data_incorrect = True
+                    continue
+
+                # Verify data integrity with parity
+                if check_parity(data_blocks, parity_block):
+                    data_incorrect = False
+                else:
+                    print("❌ Data integrity check failed, re-reading stripe")
+                    data_incorrect = True
+
+            # Check if we got all blocks for this stripe
+            print(
+                f"   Retrieved {len(stripe_blocks)} blocks from stripe {stripe_index}"
+            )
+
+            # Store the stripe data for file reconstruction
+            stripe_data_list = [
+                block_info
+                for block_info in stripe_blocks.values()
+                if block_info is not None
+            ]
+            all_stripe_data.append(stripe_data_list)
+
+        return all_stripe_data
+
+    def read_block(self, disk, stripe_index, filename, disk_index, result_dict):
+        """Read a block from a disk and store result in result_dict"""
+        disk_addr = (disk.get("ip"), disk.get("c_port"))
+        id = generate_id()
+        event = self.events.add_event(id)
+        send_message(
+            self.command_socket,
+            disk_addr,
+            ok_request(
+                "read-block",
+                {
+                    "file-name": filename,
+                    "stripe-index": stripe_index,
+                },
+                id=id,
+            ),
+        )
+        event.wait()
+        response = self.events.get_event_data(id)
+
+        if response is None or not check_ok(response, "response", "read-block"):
+            print(
+                f"❌ Error reading stripe {stripe_index} of file '{filename}' from disk {disk.get('name')}"
+            )
+            result_dict[disk_index] = None
+            return
+
+        data = response.get("data", {})
+        block_type = data.get("block-type")
+        block_index = data.get("block-index")
+        num_chunks = data.get("num-chunks")
+
+        # Use block_index as storage key (globally unique across entire file)
+        if filename not in self.files_data:
+            self.files_data[filename] = {}
+
+        self.files_data[filename][block_index] = {
+            "chunks": [None] * num_chunks,
+            "block_type": block_type,
+            "block_index": block_index,
+        }
+
+        finish_id = generate_id()
+
+        send_message(
+            self.command_socket,
+            disk_addr,
+            ok_request(
+                "read-chunks",
+                {
+                    "file-name": filename,
+                    "stripe-index": stripe_index,
+                    "block-index": block_index,  # Include block_index so chunks know where to go
+                    "finish-id": finish_id,
+                },
+                id=id,
+            ),
+        )
+
+        message = self.events.add_event_and_wait(finish_id, timeout=10)
+
+        if message is None or not check_ok(message, "response", "read-chunks"):
+            print("❌ Read chunks timeout - no response from disk OR error")
+            result_dict[disk_index] = None
+            return
+
+        # Reconstruct block from chunks using block_index as key
+        chunks_list = self.files_data[filename][block_index]["chunks"]
+
+        # Check if all chunks were received
+        if any(chunk is None for chunk in chunks_list):
+            print(
+                f"❌ Missing chunks for stripe {stripe_index} from disk {disk.get('name')}"
+            )
+            result_dict[disk_index] = None
+            return
+
+        # Concatenate all chunks to reconstruct the block
+        block = b"".join(chunks_list)
+
+        # Clean up storage
+        del self.files_data[filename][block_index]
+
+        result_dict[disk_index] = (block, block_type, block_index)
+
+    def disk_failure(self):
+        dss_name = input("Enter DSS name: ")
+        id = generate_id()
+        send_message(
+            self.manager_socket,
+            self.manager_address,
+            ok_request(
+                "disk-failure",
+                {
+                    "dss-name": dss_name,
+                },
+                id=id,
+            ),
+        )
+
+        message = self.events.add_event_and_wait(id, timeout=5)
+
+        if message is None:
+            print("❌ Disk failure timeout - no response from manager")
+            return
+
+        if not check_ok(message, "response", "disk-failure"):
+            print("Disk failure unsuccessful: ", message.get("error"))
+            return
+
+        data = message.get("data", {})
+        disks = data.get("disks", [])
+        striping_unit = data.get("striping_unit")
+        num_disks = data.get("num_disks")
+        files = data.get("files", [])
+        failed_disk = random.choice(disks)
+
+        response = self.fail_disk(failed_disk)
+        if not response:
+            print("Disk failure unsuccessful during fail_disk call")
+            return
+
+        for file in files:
+            filename = file.get("file-name")
+            file_size = file.get("file-size")
+            print(
+                f"✅ Disk failure simulated for DSS '{dss_name}' on file '{filename}'"
+            )
+
+    def fail_disk(self, disk):
+        disk_addr = (disk.get("ip"), disk.get("c_port"))
+        id = generate_id()
+        send_message(
+            self.command_socket,
+            disk_addr,
+            ok_request(
+                "fail",
+                {},
+                id=id,
+            ),
+        )
+
+        message = self.events.add_event_and_wait(id, timeout=5)
+
+        if message is None:
+            print("❌ Fail disk timeout - no response from disk")
+            return
+
+        if not check_ok(message, "response", "fail-disk"):
+            print("Disk failure unsuccessful: ", message.get("error"))
+            return False
+
+        return True
 
     def start(self):
         # Start the manager port listener thread
@@ -430,8 +634,23 @@ class UserProcess:
                         self.copy_file()
                     case "4":
                         self.read_file()
+                    case "5":
+                        self.disk_failure()
                     case _:
                         print("Unkown Command")
+
+    def handle_read_chunk(self, message, addr):
+        """Handle store-chunk request"""
+        data = message.get("data")
+        filename = data.get("file-name")
+        block_index = data.get("block-index")
+        chunk_index = data.get("chunk-index")
+        chunk_data = data.get("chunk-data")
+
+        # Store the chunk data using block_index as key
+        self.files_data[filename][block_index]["chunks"][chunk_index] = bytes(
+            chunk_data
+        )
 
     def handle_command_port(self):
         """Handle command port (c_port) - receives responses from disks"""
@@ -452,39 +671,12 @@ class UserProcess:
                 continue
 
             match type, action:
-                case "respond", "copy-chunk":
-                    self.handle_copy_chunk(message, addr)
+                case "response", "read-chunk":
+                    self.handle_read_chunk(message, addr)
                 case _:
-                    print(f"⚠️  Received unexpected message from {addr}: {action}")
-
-    def handle_copy_chunk(self, message, addr):
-        """Handle individual chunk of a block"""
-        data = message.get("data")
-        filename = data.get("file-name")
-        block_index = data.get("block-index")
-        stripe_index = data.get("stripe-index")
-        chunk_index = data.get("chunk-index")
-        chunk_data = data.get("chunk-data")
-
-        print(
-            f"Received chunk {chunk_index} for block {block_index} of file {filename} stripe {stripe_index}"
-        )
-
-        # Store the chunk using utility function
-        success = store_chunk(
-            self.files_data,
-            filename,
-            stripe_index,
-            block_index,
-            chunk_index,
-            chunk_data,
-        )
-
-        if not success:
-            print(
-                f"❌ Received chunk for unknown block: {filename} stripe {stripe_index} block {block_index}"
-            )
-            return
+                    print(
+                        f"⚠️  Received unexpected message from {addr}: {action}, id={id}"
+                    )
 
     def handle_manager_port(self):
         """Handle manager port (m_port)"""

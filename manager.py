@@ -34,31 +34,70 @@ class ManagerProcess:
     def start(self):
         with self.s:
             while True:
-                message, addr = recieve_message(self.s)
-                if message is None:
-                    continue
+                try:
+                    message, addr = recieve_message(self.s)
+                    if message is None:
+                        continue
 
-                print(f"Received message from {addr}: {message}")
-                # Handle message here
+                    print(f"Received message from {addr}: {message}")
+                    # Handle message here
 
-                type, action = message.get("type"), message.get("action")
-                match type, action:
-                    case "request", "register-user":
-                        self.handle_register_user(message, addr)
-                    case "request", "deregister-user":
-                        self.handle_deregister_user(message, addr)
-                    case "request", "register-disk":
-                        self.handle_register_disk(message, addr)
-                    case "request", "deregister-disk":
-                        self.handle_deregister_disk(message, addr)
-                    case "request", "configure-dss":
-                        self.handle_configure_dss(message, addr)
-                    case "request", "copy-file":
-                        self.handle_copy_file(message, addr)
-                    case "request", "read-file":
-                        self.handle_read_file(message, addr)
-                    case _:
-                        print(f"❌ Unknown message ({type}, {action}) from {addr}")
+                    type, action = message.get("type"), message.get("action")
+                    match type, action:
+                        case "request", "register-user":
+                            self.handle_register_user(message, addr)
+                        case "request", "deregister-user":
+                            self.handle_deregister_user(message, addr)
+                        case "request", "register-disk":
+                            self.handle_register_disk(message, addr)
+                        case "request", "deregister-disk":
+                            self.handle_deregister_disk(message, addr)
+                        case "request", "configure-dss":
+                            self.handle_configure_dss(message, addr)
+                        case "request", "copy-file":
+                            self.handle_copy_file(message, addr)
+                        case "request", "read-file":
+                            self.handle_read_file(message, addr)
+                        case "request", "disk-failure":
+                            self.handle_disk_failure(message, addr)
+                        case _:
+                            print(f"❌ Unknown message ({type}, {action}) from {addr}")
+                except Exception as e:
+                    print(f"❌ Error handling message from {addr}: {e}")
+
+    def handle_disk_failure(self, message, addr):
+
+        data = message.get("data")
+        dss_name = data.get("dss-name")
+        id = message.get("id")
+
+        print("Handling disk failure")
+
+        if dss_name not in self.dss_data:
+            print("dss does not exist:", dss_name)
+            send_message(
+                self.s,
+                addr,
+                error_response("disk-failure", "dss does not exist", id=id),
+            )
+            return
+
+        dss_info = self.dss_data[dss_name]
+        num_disks = dss_info.get("num_disks")
+        striping_unit = dss_info.get("striping_unit")
+        disks = dss_info.get("disks")
+        disk_info = [self.disk_data[disk] for disk in disks]
+        files = dss_info.get("files")
+        file_info = [self.file_data[file] for file in files]
+
+        data = {
+            "num_disks": num_disks,
+            "striping_unit": striping_unit,
+            "disks": disk_info,
+            "files": file_info,
+        }
+
+        send_message(self.s, addr, ok_response("disk-failure", data, id=id))
 
     def handle_read_file(self, message, addr):
         data = message.get("data")
@@ -131,12 +170,6 @@ class ManagerProcess:
             )
             return
 
-        dss_name, dss_info = random.choice(list(self.dss_data.items()))
-        num_disks = dss_info.get("num_disks")
-        striping_unit = dss_info.get("striping_unit")
-        disks = dss_info.get("disks")
-        disk_info = [self.disk_data[disk] for disk in disks]
-
         if filename in self.file_data:
             print("File already exists:", filename)
             send_message(
@@ -145,6 +178,12 @@ class ManagerProcess:
                 error_response("copy-file", "File already exists", id=id),
             )
             return
+
+        dss_name, dss_info = random.choice(list(self.dss_data.items()))
+        num_disks = dss_info.get("num_disks")
+        striping_unit = dss_info.get("striping_unit")
+        disks = dss_info.get("disks")
+        disk_info = [self.disk_data[disk] for disk in disks]
 
         data = {
             "num_disks": num_disks,
@@ -180,6 +219,7 @@ class ManagerProcess:
             "striping_unit": striping_unit,
             "num_disks": num_disks,
             "size": file_size,
+            "owner": owner,  # Store owner as a list
         }
         dss_info["files"][filename] = self.file_data[filename]
 
@@ -220,6 +260,7 @@ class ManagerProcess:
             return
 
         selected_disks = random.sample(list(self.free_disks), num_disks)
+        self.free_disks.difference_update(selected_disks)
         self.dss_data[name] = {
             "disks": selected_disks,
             "striping_unit": striping_unit,
@@ -279,9 +320,19 @@ class ManagerProcess:
             )
             return
 
+        if name not in self.free_disks:
+            print("Disk is currently in use:", name)
+            send_message(
+                self.s,
+                addr,
+                error_response("deregister-disk", "Disk is currently in use", id=id),
+            )
+            return
+
         disk = self.disk_data.pop(name)
         self.used_ports.remove(disk.get("c_port"))
         self.used_ports.remove(disk.get("m_port"))
+        self.free_disks.remove(name)
         send_message(self.s, addr, ok_response("deregister-disk", {}, id=id))
         print("de-register successfuly")
 

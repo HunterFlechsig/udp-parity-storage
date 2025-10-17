@@ -6,6 +6,8 @@ import select
 import os
 import math
 
+chunk_size = 8192  # 8 KB chunk size for sending data
+
 
 def user_command_line_args():
     """Main function to parse command line arguments and start the user process"""
@@ -349,15 +351,11 @@ def calculate_num_stripes(file_size, striping_unit, num_disks):
     return num_stripes
 
 
-def split_block_into_chunks(block, chunk_size=2048):
+def split_block_into_chunks(block, chunk_size=chunk_size):
     """
     Split a block of data into smaller chunks of specified size.
     """
     return [block[i : i + chunk_size] for i in range(0, len(block), chunk_size)]
-
-
-def send_block():
-    pass
 
 
 def calculate_parity(blocks):
@@ -374,35 +372,79 @@ def calculate_parity(blocks):
     return bytes(parity)
 
 
-def store_chunk(
-    files_data, filename, stripe_index, block_index, chunk_index, chunk_data
-):
+def calculate_num_chunks(block_size, chunk_size=chunk_size):
+    return math.ceil(block_size / chunk_size)
+
+
+def check_parity(blocks, parity_block):
     """
-    Store a chunk of data in the files_data structure.
+    Check if the parity block matches the calculated parity from data blocks.
+    Returns True if parity matches, False otherwise.
+    """
+    calculated_parity = calculate_parity(blocks)
+    return calculated_parity == parity_block
+
+
+def construct_read_file(directory, filename, stripe_data, file_size):
+    """
+    Construct a file from stripe data, removing parity blocks and null padding
+    """
+    # Create directory if it doesn't exist
+    os.makedirs(directory, exist_ok=True)
+
+    file_path = os.path.join(directory, filename)
+
+    # Sort all blocks by block_index to get correct order
+    all_blocks = []
+    for stripe_blocks in stripe_data:
+        for block_data, block_type, block_index in stripe_blocks:
+            if block_type == "data":  # Skip parity blocks
+                all_blocks.append((block_index, block_data))
+
+    # Sort by block_index
+    all_blocks.sort(key=lambda x: x[0])
+
+    # Concatenate all data blocks
+    full_data = b"".join(block_data for _, block_data in all_blocks)
+
+    # Trim to actual file size (removes null padding)
+    actual_data = full_data[:file_size]
+
+    # Write to file
+    with open(file_path, "wb") as f:
+        f.write(actual_data)
+
+    print(f"✅ File '{filename}' written to {file_path} ({len(actual_data)} bytes)")
+
+    return file_path
+
+
+def compare_files(original_path, reconstructed_path):
+    """
+    Compare two files byte-by-byte and report if they match.
 
     Args:
-        files_data: Dictionary storing file data [filename][stripe_index][block_index]
-        filename: Name of the file
-        stripe_index: Index of the stripe
-        block_index: Index of the block within the stripe
-        chunk_index: Index of the chunk within the block
-        chunk_data: The actual chunk data (list or bytes)
-
-    Returns:
-        True if chunk was stored successfully, False if block doesn't exist
+        original_path: Path to the original file
+        reconstructed_path: Path to the reconstructed file
     """
-    # Store the chunk
-    if (
-        filename in files_data
-        and stripe_index in files_data[filename]
-        and block_index in files_data[filename][stripe_index]
-    ):
-        block_info = files_data[filename][stripe_index][block_index]
-        block_info["chunks"][chunk_index] = bytes(chunk_data)
-        return True
-    else:
-        return False
+    try:
+        with open(original_path, "rb") as f1, open(reconstructed_path, "rb") as f2:
+            original_data = f1.read()
+            reconstructed_data = f2.read()
 
+            if original_data == reconstructed_data:
+                print(f"✅ File integrity verified: Files match perfectly!")
+            else:
+                print(f"❌ File integrity check FAILED: Files differ!")
+                print(f"   Original size: {len(original_data)} bytes")
+                print(f"   Reconstructed size: {len(reconstructed_data)} bytes")
 
-def calculate_num_chunks(block_size, chunk_size=2048):
-    return math.ceil(block_size / chunk_size)
+                # Find first difference
+                for i, (b1, b2) in enumerate(zip(original_data, reconstructed_data)):
+                    if b1 != b2:
+                        print(
+                            f"   First difference at byte {i}: original={b1:02x}, reconstructed={b2:02x}"
+                        )
+                        break
+    except FileNotFoundError as e:
+        print(f"⚠️  Cannot compare files: {e}")

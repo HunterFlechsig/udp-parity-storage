@@ -14,6 +14,7 @@ from utils import (
     send_message,
     ok_request,
     ok_response,
+    error_response,
     check_ok,
     ThreadEvents,
     generate_id,
@@ -176,6 +177,7 @@ class DiskProcess:
 
     def handle_fail_disk(self, message, addr):
         """Handle fail-disk request"""
+        id = message.get("id")
         print(f"💥 Simulating disk failure - clearing all files")
 
         # Simulate disk failure by clearing the file's data
@@ -194,6 +196,21 @@ class DiskProcess:
         filename = data.get("file-name")
         stripe_index = data.get("stripe-index")
         id = message.get("id")
+
+        # Check if file exists (could be missing due to disk failure)
+        if filename not in self.files_data or stripe_index not in self.files_data.get(
+            filename, {}
+        ):
+            print(
+                f"⚠️  Cannot read block - file '{filename}' stripe {stripe_index} not found (disk may have failed)"
+            )
+            response = error_response(
+                "read-block",
+                f"File '{filename}' stripe {stripe_index} not found",
+                id=id,
+            )
+            send_message(self.command_socket, addr, response)
+            return
 
         block_info = self.files_data[filename][stripe_index]
         response = ok_response(
@@ -223,29 +240,13 @@ class DiskProcess:
         )
 
         for chunk_index, chunk_data in enumerate(block_info["chunks"]):
-            # Randomly flip a bit in the first chunk with 10% probability
-            data_to_send = chunk_data
-            if chunk_index == 0 and random.random() < self.p / 100:
-                # Convert to bytearray to modify
-                corrupted_data = bytearray(chunk_data)
-                if len(corrupted_data) > 0:
-                    # Pick a random byte and bit position
-                    byte_pos = random.randint(0, len(corrupted_data) - 1)
-                    bit_pos = random.randint(0, 7)
-                    # Flip the bit
-                    corrupted_data[byte_pos] ^= 1 << bit_pos
-                    data_to_send = bytes(corrupted_data)
-                    print(
-                        f"🔥 CORRUPTED: Flipped bit {bit_pos} in byte {byte_pos} of first chunk"
-                    )
-
             chunk_response = ok_response(
                 "read-chunk",
                 {
                     "file-name": filename,
                     "block-index": block_index,  # Echo back block_index so user knows where to store
                     "chunk-index": chunk_index,
-                    "chunk-data": list(data_to_send) if data_to_send else [],
+                    "chunk-data": list(chunk_data),
                     "finish-id": finish_id,
                 },
                 id=generate_id(),

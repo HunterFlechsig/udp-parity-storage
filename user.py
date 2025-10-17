@@ -366,8 +366,8 @@ class UserProcess:
             disks = message_data.get("disks", [])
             num_stripes = calculate_num_stripes(file_size, striping_unit, num_disks)
 
-            all_stripe_data = self.read_file_2(
-                filename, file_size, num_stripes, disks, num_disks
+            all_stripe_data = self.read_file_helper(
+                filename, file_size, num_stripes, disks, num_disks, False
             )
 
             print(f"\n✅ File '{filename}' read completed")
@@ -380,16 +380,22 @@ class UserProcess:
             print(f"❌ Error reading file: {e}")
             return
 
-    def read_file_2(self, filename, file_size, num_stripes, disks, num_disks):
+    def read_file_helper(
+        self, filename, file_size, num_stripes, disks, num_disks, reconstruct
+    ):
         print(f"📋 Reading file: {filename} ({file_size} bytes)")
         self.files_data[filename] = {}
 
         # List to store all stripe data for file reconstruction
         all_stripe_data = []
 
+        # List to store reconstructed blocks to send after all reads complete
+        reconstructed_blocks = []
+
         for stripe_index in range(num_stripes):
             print(f"\n📦 Reading stripe {stripe_index + 1}/{num_stripes}")
             data_incorrect = True
+
             while data_incorrect:
                 stripe_blocks = {}  # Use dictionary, not list
                 threads = []
@@ -410,6 +416,99 @@ class UserProcess:
 
                 for t in threads:
                     t.join()
+
+                # Count missing blocks
+                missing_blocks = [
+                    disk_idx
+                    for disk_idx in range(num_disks)
+                    if stripe_blocks.get(disk_idx) is None
+                ]
+
+                # If reconstruct mode and exactly one block is missing, reconstruct it
+                if reconstruct and len(missing_blocks) == 1:
+                    missing_disk_idx = missing_blocks[0]
+                    print(
+                        f"🔧 Reconstructing missing block from disk {missing_disk_idx}"
+                    )
+
+                    # Collect all available blocks IN DISK ORDER (important for XOR)
+                    available_blocks = []
+                    available_block_info = []
+                    for disk_idx in range(num_disks):
+                        if disk_idx != missing_disk_idx:
+                            block_info = stripe_blocks.get(disk_idx)
+                            if block_info:
+                                block_data, block_type, block_index = block_info
+                                available_blocks.append(block_data)
+                                available_block_info.append(
+                                    (disk_idx, block_type, block_index)
+                                )
+
+                    print(
+                        f"   Debug reconstruction: Available blocks from disks: {[info[0] for info in available_block_info]}"
+                    )
+                    print(
+                        f"   Debug reconstruction: Block types: {[info[1] for info in available_block_info]}"
+                    )
+
+                    # XOR all available blocks to reconstruct the missing one
+                    reconstructed_block = calculate_parity(available_blocks)
+
+                    # Determine the type and index of the reconstructed block
+                    # The missing block is either data or parity
+                    parity_position = stripe_index % num_disks
+                    if missing_disk_idx == parity_position:
+                        reconstructed_type = "parity"
+                        # Calculate block_index for parity block
+                        reconstructed_index = (
+                            stripe_index * num_disks + missing_disk_idx
+                        )
+                    else:
+                        reconstructed_type = "data"
+                        # Calculate block_index for data block
+                        reconstructed_index = (
+                            stripe_index * num_disks + missing_disk_idx
+                        )
+
+                    # Store reconstructed block info to send after all reads complete
+                    failed_disk = disks[missing_disk_idx]
+                    print(
+                        f"💾 Storing reconstructed block (type={reconstructed_type}, index={reconstructed_index}) for {failed_disk.get('name')}"
+                    )
+
+                    reconstructed_blocks.append(
+                        {
+                            "block": reconstructed_block,
+                            "index": reconstructed_index,
+                            "type": reconstructed_type,
+                            "stripe_index": stripe_index,
+                            "disk": failed_disk,
+                            "disk_idx": missing_disk_idx,
+                        }
+                    )
+
+                    # Add reconstructed block to stripe_blocks for verification
+                    stripe_blocks[missing_disk_idx] = (
+                        reconstructed_block,
+                        reconstructed_type,
+                        reconstructed_index,
+                    )
+
+                    print(f"✅ Block reconstructed for disk {missing_disk_idx}")
+
+                # If not in reconstruct mode and blocks are missing, fail
+                if not reconstruct and len(missing_blocks) > 0:
+                    print(f"❌ Missing blocks for stripe {stripe_index}, retrying...")
+                    data_incorrect = True
+                    continue
+
+                # If in reconstruct mode and more than 1 block is missing, fail
+                if reconstruct and len(missing_blocks) > 1:
+                    print(
+                        f"❌ Cannot reconstruct: {len(missing_blocks)} blocks missing (only 1 can be recovered)"
+                    )
+                    data_incorrect = True
+                    continue
 
                 # Separate parity block from data blocks
                 parity_block = None
@@ -432,6 +531,50 @@ class UserProcess:
                     data_blocks_dict[i] for i in sorted(data_blocks_dict.keys())
                 ]
 
+                # Debug: Show block order for parity check
+                if reconstruct:
+                    print(
+                        f"   Debug parity check: Data block indices: {sorted(data_blocks_dict.keys())}"
+                    )
+                    print(f"   Debug parity check: Parity disk: {parity_disk_index}")
+
+                # Simulate random bit flip during normal reads (not reconstruction)
+                if not reconstruct and random.random() < 0.10:  # 10% chance
+                    # Pick a random block to corrupt (could be data or parity)
+                    all_blocks = (
+                        data_blocks + [parity_block] if parity_block else data_blocks
+                    )
+                    if all_blocks:
+                        corrupt_idx = random.randint(0, len(all_blocks) - 1)
+                        block_to_corrupt = all_blocks[corrupt_idx]
+
+                        if len(block_to_corrupt) > 0:
+                            # Convert to bytearray to modify
+                            corrupted_block = bytearray(block_to_corrupt)
+                            # Pick a random byte and bit position
+                            byte_pos = random.randint(0, len(corrupted_block) - 1)
+                            bit_pos = random.randint(0, 7)
+                            # Flip the bit
+                            corrupted_block[byte_pos] ^= 1 << bit_pos
+
+                            # Replace the block with corrupted version
+                            if corrupt_idx < len(data_blocks):
+                                data_blocks[corrupt_idx] = bytes(corrupted_block)
+                                print(
+                                    f"🔥 CORRUPTED: Flipped bit {bit_pos} in byte {byte_pos} of data block {corrupt_idx}"
+                                )
+                            else:
+                                parity_block = bytes(corrupted_block)
+                                print(
+                                    f"🔥 CORRUPTED: Flipped bit {bit_pos} in byte {byte_pos} of parity block"
+                                )
+
+                # Debug: Print block info
+                if reconstruct:
+                    print(
+                        f"   Debug: parity_disk={parity_disk_index}, data_blocks={len(data_blocks)}, missing={missing_blocks}"
+                    )
+
                 # Check if we have all blocks
                 if parity_block is None or len(data_blocks) != num_disks - 1:
                     print(f"❌ Missing blocks for stripe {stripe_index}, retrying...")
@@ -443,6 +586,8 @@ class UserProcess:
                     data_incorrect = False
                 else:
                     print("❌ Data integrity check failed, re-reading stripe")
+                    if reconstruct:
+                        print(f"   Debug: Reconstructed block may be incorrect")
                     data_incorrect = True
 
             # Check if we got all blocks for this stripe
@@ -457,6 +602,26 @@ class UserProcess:
                 if block_info is not None
             ]
             all_stripe_data.append(stripe_data_list)
+
+        # After all stripes are read, send reconstructed blocks back to failed disk
+        if reconstructed_blocks:
+            print(
+                f"\n📤 Sending {len(reconstructed_blocks)} reconstructed block(s) to failed disk"
+            )
+            for rb in reconstructed_blocks:
+                print(
+                    f"   Sending block {rb['index']} (type={rb['type']}) to {rb['disk'].get('name')}"
+                )
+                self.send_block(
+                    rb["block"],
+                    rb["index"],
+                    rb["type"],
+                    rb["stripe_index"],
+                    num_stripes,
+                    filename,
+                    rb["disk"],
+                )
+            print("✅ All reconstructed blocks sent")
 
         return all_stripe_data
 
@@ -546,48 +711,63 @@ class UserProcess:
         result_dict[disk_index] = (block, block_type, block_index)
 
     def disk_failure(self):
-        dss_name = input("Enter DSS name: ")
-        id = generate_id()
-        send_message(
-            self.manager_socket,
-            self.manager_address,
-            ok_request(
-                "disk-failure",
-                {
-                    "dss-name": dss_name,
-                },
-                id=id,
-            ),
-        )
-
-        message = self.events.add_event_and_wait(id, timeout=5)
-
-        if message is None:
-            print("❌ Disk failure timeout - no response from manager")
-            return
-
-        if not check_ok(message, "response", "disk-failure"):
-            print("Disk failure unsuccessful: ", message.get("error"))
-            return
-
-        data = message.get("data", {})
-        disks = data.get("disks", [])
-        striping_unit = data.get("striping_unit")
-        num_disks = data.get("num_disks")
-        files = data.get("files", [])
-        failed_disk = random.choice(disks)
-
-        response = self.fail_disk(failed_disk)
-        if not response:
-            print("Disk failure unsuccessful during fail_disk call")
-            return
-
-        for file in files:
-            filename = file.get("file-name")
-            file_size = file.get("file-size")
-            print(
-                f"✅ Disk failure simulated for DSS '{dss_name}' on file '{filename}'"
+        try:
+            dss_name = input("Enter DSS name: ")
+            id = generate_id()
+            send_message(
+                self.manager_socket,
+                self.manager_address,
+                ok_request(
+                    "disk-failure",
+                    {
+                        "dss-name": dss_name,
+                    },
+                    id=id,
+                ),
             )
+
+            message = self.events.add_event_and_wait(id, timeout=5)
+
+            if message is None:
+                print("❌ Disk failure timeout - no response from manager")
+                return
+
+            if not check_ok(message, "response", "disk-failure"):
+                print("Disk failure unsuccessful: ", message.get("error"))
+                return
+
+            data = message.get("data", {})
+            disks = data.get("disks", [])
+            striping_unit = data.get("striping_unit")
+            num_disks = data.get("num_disks")
+            files = data.get("files", [])
+            failed_disk = random.choice(disks)
+
+            print(f"\n💥 Failing disk: {failed_disk.get('name')}")
+            response = self.fail_disk(failed_disk)
+            if not response:
+                print("Disk failure unsuccessful during fail_disk call")
+                return
+
+            print(f"\n🔧 Starting reconstruction for {len(files)} file(s)...")
+
+            for file in files:
+                filename = file.get("file-name")
+                file_size = file.get("file-size")
+                print(f"\n📋 Reconstructing file '{filename}' ({file_size} bytes)")
+
+                # Calculate number of stripes for this file
+                num_stripes = calculate_num_stripes(file_size, striping_unit, num_disks)
+
+                # Read file with reconstruction enabled
+                all_stripe_data = self.read_file_helper(
+                    filename, file_size, num_stripes, disks, num_disks, reconstruct=True
+                )
+
+                print(f"✅ File '{filename}' reconstructed successfully")
+        except Exception as e:
+            print(f"❌ Error during disk failure handling: {e}")
+            return
 
     def fail_disk(self, disk):
         disk_addr = (disk.get("ip"), disk.get("c_port"))
@@ -608,7 +788,7 @@ class UserProcess:
             print("❌ Fail disk timeout - no response from disk")
             return
 
-        if not check_ok(message, "response", "fail-disk"):
+        if not check_ok(message, "response", "fail"):
             print("Disk failure unsuccessful: ", message.get("error"))
             return False
 

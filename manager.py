@@ -74,7 +74,7 @@ class ManagerProcess:
         print("Handling disk failure")
 
         if dss_name not in self.dss_data:
-            print("dss does not exist:", dss_name)
+            print("Disk does not exist:", dss_name)
             send_message(
                 self.s,
                 addr,
@@ -87,8 +87,17 @@ class ManagerProcess:
         striping_unit = dss_info.get("striping_unit")
         disks = dss_info.get("disks")
         disk_info = [self.disk_data[disk] for disk in disks]
-        files = dss_info.get("files")
-        file_info = [self.file_data[file] for file in files]
+        files_dict = dss_info.get("files", {})
+
+        # Build file info list with correct keys for user code
+        file_info = []
+        for filename, file_data in files_dict.items():
+            file_info.append(
+                {
+                    "file-name": filename,
+                    "file-size": file_data.get("size"),
+                }
+            )
 
         data = {
             "num_disks": num_disks,

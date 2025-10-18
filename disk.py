@@ -4,6 +4,7 @@
 # Disk process is responsible for the storage of data
 # Disk process uses separate threads to manage manager (m) and client (c) ports
 
+from email.mime import message
 import socket
 import threading
 import sys
@@ -24,9 +25,12 @@ from time import sleep
 
 def print_commands():
     print("Disk Commands")
-    print("1. deregister        - deregister with manager and exit")
+    print("--- ---")
+    print("exit. deregister     - deregister with manager and exit")
+    print("help.                - print this help message")
+    print("--- ---")
 
-
+# DiskProcess class for managing disk operations
 class DiskProcess:
     def __init__(self, name, ip, m_port, c_port, manager_address):
         self.name = name
@@ -44,10 +48,12 @@ class DiskProcess:
 
         self.files_data = {}
         self.events = ThreadEvents()
-        self.p = 10  # Probability percentage for corruption
-        self.register_user()
+        self.register_disk()
 
-    def register_user(self):
+    def register_disk(self):
+        """ Register disk with manager """
+        # Send register-disk request to manager
+        print ("Registering disk with manager...")
         send_message(
             self.manager_socket,
             self.manager_address,
@@ -62,9 +68,8 @@ class DiskProcess:
             ),
         )
 
+        # Wait for register-disk response from manager
         message, _ = recieve_message(self.manager_socket, 3)
-
-        print(message)
 
         if message is None:
             print("No register disk message recieved from manager")
@@ -74,11 +79,14 @@ class DiskProcess:
             print("Failed to register disk : ", message.get("error"))
             sys.exit(1)
 
-        print("Disk registered successfully")
+        print("Disk registered successfully \n")
         self.start()
 
     def deregister_disk(self):
+        """ Deregister disk with manager """
+        print("Deregistering disk with manager...")
         id = generate_id()
+        # Send deregister-disk request to manager
         send_message(
             self.manager_socket,
             self.manager_address,
@@ -91,58 +99,73 @@ class DiskProcess:
             ),
         )
 
+        # Wait for deregister-disk response from manager
         message = self.events.add_event_and_wait(id, timeout=5)
 
+        # Check response
         if message is None:
             print("❌ Deregister timeout - no response from manager")
             return
 
         if not check_ok(message, "response", "deregister-disk"):
-            print("deregister unsucessful")
+            print("Deregister unsuccessful : ", message.get("error"))
             return
 
-        print("dergister sucessful")
+
+        print("Deregister successful")
         self.running = False
 
     def start(self):
+        """ start disk process """
+
         # Start the manager port listener thread
         threading.Thread(target=self.handle_manager_port, daemon=True).start()
         # Start the command port listener thread
         threading.Thread(target=self.handle_command_port, daemon=True).start()
 
+        # Main loop for user commands
         with self.manager_socket, self.command_socket:
             while self.running:
-                print_commands()
                 command = input("input command:")
 
                 match command:
-                    case "1":
+                    case "exit":
                         self.deregister_disk()
+                    case "help":
+                        print_commands()
                     case _:
-                        print("Unkown Command")
+                        print("Unknown Command")
+                        print_commands()
 
     def handle_manager_port(self):
         """Handle manager port (m_port)"""
+        # Listen for messages from the manager
         while self.running:
             message, addr = recieve_message(self.manager_socket)
             if message is None:
                 continue
-
-            print(message)
 
             type, action, id = (
                 message.get("type"),
                 message.get("action"),
                 message.get("id"),
             )
+            # handle messages
             match type, action:
                 case "response", "deregister-disk":
                     self.events.set_event(id, message)
+                case "request", "decomission-disk":
+                    self.handle_decomission_disk(message, addr)
                 case _:
                     print(f"❌ Unknown message ({type}, {action}) from manager")
 
+            if message:
+                print(" ")
+
     def handle_command_port(self):
         """Handle command port (c_port)"""
+
+        # Listen for messages from clients
         while self.running:
             message, addr = recieve_message(self.command_socket)
             if message is None:
@@ -159,8 +182,7 @@ class DiskProcess:
                 self.events.set_event(id, message)
                 continue
 
-            print(f"🔵 Received message: type={type}, action={action}")
-
+            # handle messages
             match type, action:
                 case "request", "copy-block":
                     self.handle_copy_block(message, addr)
@@ -175,6 +197,25 @@ class DiskProcess:
                 case _:
                     print(f"❌ Unknown message ({type}, {action}) from client")
 
+            if message:
+                print(" ")
+
+    def handle_decomission_disk(self, message, addr):
+        """Handle decomission-disk request"""
+        id = message.get("id")
+        print(f"🗑️  Decomissioning disk - clearing all files")
+
+        # Simulate disk decomission by clearing the file's data
+        self.files_data = {}
+
+        response = ok_response(
+            "decomission-disk",
+            {},
+            id=id,
+        )
+        # Send response back to manager
+        send_message(self.manager_socket, addr, response)
+
     def handle_fail_disk(self, message, addr):
         """Handle fail-disk request"""
         id = message.get("id")
@@ -183,6 +224,7 @@ class DiskProcess:
         # Simulate disk failure by clearing the file's data
         self.files_data = {}
 
+        # Send response back to requester
         response = ok_response(
             "fail",
             {},
@@ -212,6 +254,7 @@ class DiskProcess:
             send_message(self.command_socket, addr, response)
             return
 
+        # Send block info response
         block_info = self.files_data[filename][stripe_index]
         response = ok_response(
             "read-block",
@@ -233,12 +276,14 @@ class DiskProcess:
         block_index = data.get("block-index")
         finish_id = data.get("finish-id")
 
+        
         block_info = self.files_data[filename][stripe_index]
 
         print(
             f"📤 Sending {len(block_info['chunks'])} chunks for stripe {stripe_index}"
         )
 
+        # Send each chunk individually
         for chunk_index, chunk_data in enumerate(block_info["chunks"]):
             chunk_response = ok_response(
                 "read-chunk",
@@ -280,9 +325,11 @@ class DiskProcess:
         if filename not in self.files_data:
             self.files_data[filename] = {}
 
+        # Initialize stripe storage if needed
         if stripe_index not in self.files_data[filename]:
             self.files_data[filename][stripe_index] = {}
 
+        # Set up storage for chunks
         self.files_data[filename][stripe_index] = {
             "chunks": [None] * num_chunks,
             "block_type": block_type,
@@ -292,7 +339,6 @@ class DiskProcess:
 
         print(f"✅ Initialized storage for {num_chunks} chunks")
 
-        # Send immediate response
         response = ok_response("copy-block", {}, id=id)
         send_message(self.command_socket, addr, response)
 

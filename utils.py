@@ -8,6 +8,19 @@ import math
 
 chunk_size = 8192  # 8 KB chunk size for sending data
 
+# Return the dictionary mapping disk names to their ports - used for messages
+name_dict = {
+    31501 or 31502 : "alpha",
+    31503 or 31504 : "bravo",
+    31505 or 31506 : "charlie",
+    31507 or 31508 : "delta",
+    31509 or 31510 : "echo",
+    31511 or 31512 : "foxtrot",
+
+    31513 or 31514 : "sudo",
+    31517 or 31518 : "user",
+    31500 : "manager"
+}
 
 def user_command_line_args():
     """Main function to parse command line arguments and start the user process"""
@@ -208,15 +221,15 @@ def create_message(command, type, data=None, error=None, status=None, id=None):
 
 
 def ok_request(command, data=None, id=None):
-    return create_message(command, "request", data=data, status="ok", id=id)
+    return create_message(command, "request", data=data, status="SUCCESS", id=id)
 
 
 def error_response(command, error, id=None):
-    return create_message(command, "response", error=error, status="error", id=id)
+    return create_message(command, "response", error=error, status="FAILURE", id=id)
 
 
 def ok_response(command, data=None, id=None):
-    return create_message(command, "response", data=data, status="ok", id=id)
+    return create_message(command, "response", data=data, status="SUCCESS", id=id)
 
 
 def recieve_message(socket, timeout=1):
@@ -225,17 +238,39 @@ def recieve_message(socket, timeout=1):
     if not data:
         return None, None
     message, address = socket.recvfrom(1048576 * 2)  # 2 MB buffer
-    return json.loads(message.decode("utf-8")), address
+    decoded_message = json.loads(message.decode("utf-8"))
+    print(
+        "📬 Received ",
+        (
+            decoded_message.get("type"),
+            decoded_message.get("action"),
+            decoded_message.get("status"),
+        ),
+        "from ",
+        address,
+        name_dict.get(address[1], "unknown")
+    )
+    return decoded_message, address
 
 
 def send_message(sock, addr, message):
     """Helper function to send a message to a socket"""
+    print(
+        "📤 Sending",
+        (
+            json.loads(message.decode("utf-8")).get("type"),
+            json.loads(message.decode("utf-8")).get("action"),
+            json.loads(message.decode("utf-8")).get("status"),
+        ),
+        "to",
+        name_dict.get(addr[1], "unknown"),
+    )
     sock.sendto(message, addr)
 
 
 def check_ok(message, type, action):
     if (
-        message.get("status") == "ok"
+        message.get("status") == "SUCCESS"
         and message.get("type") == type
         and message.get("action") == action
     ):
@@ -421,30 +456,51 @@ def construct_read_file(directory, filename, stripe_data, file_size):
 
 def compare_files(original_path, reconstructed_path):
     """
-    Compare two files byte-by-byte and report if they match.
-
-    Args:
-        original_path: Path to the original file
-        reconstructed_path: Path to the reconstructed file
+    Compare two files using the diff command.
     """
+    import subprocess
+    
     try:
-        with open(original_path, "rb") as f1, open(reconstructed_path, "rb") as f2:
-            original_data = f1.read()
-            reconstructed_data = f2.read()
-
-            if original_data == reconstructed_data:
-                print(f"✅ File integrity verified: Files match perfectly!")
-            else:
-                print(f"❌ File integrity check FAILED: Files differ!")
-                print(f"   Original size: {len(original_data)} bytes")
-                print(f"   Reconstructed size: {len(reconstructed_data)} bytes")
-
-                # Find first difference
-                for i, (b1, b2) in enumerate(zip(original_data, reconstructed_data)):
-                    if b1 != b2:
-                        print(
-                            f"   First difference at byte {i}: original={b1:02x}, reconstructed={b2:02x}"
-                        )
-                        break
-    except FileNotFoundError as e:
+        # Run diff command - returns 0 if files are identical, 1 if different, 2 if error
+        result = subprocess.run(
+            ['diff', '-q', original_path, reconstructed_path],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            print(f"✅ File integrity verified: Files match perfectly")
+        elif result.returncode == 1:
+            print(f"❌ File integrity check FAILED: Files differ")
+            # Run diff again without -q to show the differences
+            diff_result = subprocess.run(
+                ['diff', '-u', original_path, reconstructed_path],
+                capture_output=True,
+                text=True
+            )
+            print(diff_result.stdout)
+        else:
+            print(f"⚠️  Error running diff: {result.stderr}")
+    except FileNotFoundError:
+        print(f"⚠️  diff command not found or file does not exist")
+    except Exception as e:
         print(f"⚠️  Cannot compare files: {e}")
+
+
+def check_ok_message(message, expected_type, expected_action):
+    """
+    Check if a message has status 'ok', and matches expected type and action.
+
+    """
+
+    if (
+        not message.get("type") == expected_type
+        and not message.get("action") == expected_action
+    ):
+        return False, "❌ Error: Unexpected message type/action"
+
+    if message.get("status") == "FAILURE":
+        return False, message.get("error")
+
+    return True, None
+

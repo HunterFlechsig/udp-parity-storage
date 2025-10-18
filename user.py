@@ -1,7 +1,5 @@
-# user_threaded_v1.py
+# user.py
 # Hunter Flechsig, 1225292005
-# Approach #1: Separate Threads for Each Port
-# User process uses separate threads to manage manager (m) and client (c) ports
 
 import socket
 import threading
@@ -23,20 +21,28 @@ from utils import (
     check_parity,
     construct_read_file,
     compare_files,
+    check_ok_message,
 )
 import os
 import random
 
 
+# Print available user commands
 def print_commands():
     print("User Commands")
-    print("1. deregister        - deregister with manager and exit")
-    print("2. configure-dss     - configure a distributed storage system")
-    print("3. copy-file         - copy a file to the distributed storage system")
-    print("4. read-file         - read a file from the distributed storage system")
-    print("5. disk-failure      - simulate a disk failure")
+    print("--- ---")
+    print("1. configure-dss     - configure a distributed storage system")
+    print("2. copy-file         - copy a file to the distributed storage system")
+    print("3. read-file         - read a file from the distributed storage system")
+    print("4. disk-failure      - simulate a disk failure")
+    print("5. ls                - list files ")
+    print("6. decomission-dss   - decomission a distributed storage system")
+    print("exit. deregister        - deregister with manager and exit")
+    print("help. help              - show this help message")
+    print("--- ---")
 
 
+# UserProcess class for managing user operations
 class UserProcess:
     def __init__(self, name, ip, m_port, c_port, manager_address):
         self.name = name
@@ -57,106 +63,146 @@ class UserProcess:
         self.register_user()
 
     def register_user(self):
-        send_message(
-            self.manager_socket,
-            self.manager_address,
-            ok_request(
-                "register-user",
-                {
-                    "name": self.name,
-                    "ip": self.ip,
-                    "c_port": self.c_port,
-                    "m_port": self.m_port,
-                },
-            ),
-        )
+        print("Registering user with manager...")
+        try:
+            # send register user message to manager
+            send_message(
+                self.manager_socket,
+                self.manager_address,
+                ok_request(
+                    "register-user",
+                    {
+                        "name": self.name,
+                        "ip": self.ip,
+                        "c_port": self.c_port,
+                        "m_port": self.m_port,
+                    },
+                ),
+            )
 
-        message, _ = recieve_message(self.manager_socket, 3)
+            # wait for response from manager
+            message, _ = recieve_message(self.manager_socket, 5)
 
-        print(message)
+            # check if response came in and status is successful
+            if message is None:
+                print("❌ Register user timeout - no response from manager")
+                sys.exit(1)
 
-        if message is None:
-            print("No register user message recieved from manager")
+            status, error_message = check_ok_message(
+                message, "response", "register-user"
+            )
+            if not status:
+                print("Failed to register user : ", error_message)
+                sys.exit(1)
+
+            # User registered successfully - start main loop
+            print("User registered successfully \n")
+            self.start()
+        except Exception as e:
+            print(f"❌ Error registering user: {e}")
             sys.exit(1)
-
-        if not check_ok(message, "response", "register-user"):
-            print("Failed to register user : ", message.get("error"))
-            sys.exit(1)
-
-        print("User registered successfully")
-        self.start()
 
     def configure_dss(self):
-        dss_name = input("Enter DSS name: ")
-        num_disks = int(input("Enter number of disks: "))
-        striping_unit = int(input("Enter striping unit (in bytes): "))
-        id = generate_id()
-        send_message(
-            self.manager_socket,
-            self.manager_address,
-            ok_request(
-                "configure-dss",
-                {
-                    "name": dss_name,
-                    "num_disks": num_disks,
-                    "striping_unit": striping_unit,
-                },
-                id=id,
-            ),
-        )
+        """Configure a distributed storage system (DSS)"""
+        try:
+            dss_name = input("Enter DSS name: ")
+            num_disks = int(input("Enter number of disks: "))
+            striping_unit = int(input("Enter striping unit (in bytes): "))
+            # Send configure-dss request to manager
+            id = generate_id()
+            send_message(
+                self.manager_socket,
+                self.manager_address,
+                ok_request(
+                    "configure-dss",
+                    {
+                        "name": dss_name,
+                        "num_disks": num_disks,
+                        "striping_unit": striping_unit,
+                    },
+                    id=id,
+                ),
+            )
 
-        message = self.events.add_event_and_wait(id, timeout=5)
+            # Wait response from manager with id of request
+            message = self.events.add_event_and_wait(id, timeout=5)
 
-        if message is None:
-            print("❌ Configure DSS timeout - no response from manager")
+            # Check if response came in and status is successful
+            if message is None:
+                print("❌ Configure DSS timeout - no response from manager")
+                return
+
+            status, error_message = check_ok_message(
+                message, "response", "configure-dss"
+            )
+
+            if not status:
+                print("Configure DSS unsuccessful: ", error_message)
+                return
+
+            print("Configure DSS successful")
+        except Exception as e:
+            print(f"❌ Error configuring DSS: {e}")
             return
-
-        if not check_ok(message, "response", "configure-dss"):
-            print("Configure DSS unsuccessful: ", message.get("error"))
-            return
-
-        print("Configure DSS successful")
 
     def deregister_user(self):
-        id = generate_id()
-        send_message(
-            self.manager_socket,
-            self.manager_address,
-            ok_request(
-                "deregister-user",
-                {
-                    "name": self.name,
-                },
-                id=id,
-            ),
-        )
+        """Deregister user from manager and exit"""
+        try:
+            # Send deregister user request to manager
+            id = generate_id()
+            send_message(
+                self.manager_socket,
+                self.manager_address,
+                ok_request(
+                    "deregister-user",
+                    {
+                        "name": self.name,
+                    },
+                    id=id,
+                ),
+            )
 
-        message = self.events.add_event_and_wait(id, timeout=5)
+            # Wait response from manager with id of request
+            message = self.events.add_event_and_wait(id, timeout=5)
 
-        if message is None:
-            print("❌ Deregister timeout - no response from manager")
+            # Check if response came in and status is successful
+            if message is None:
+                print("❌ Deregister user timeout - no response from manager")
+                return
+
+            status, error_message = check_ok_message(
+                message, "response", "deregister-user"
+            )
+
+            if not status:
+                print("Deregister unsuccessful: ", error_message)
+                return
+
+            # set running to false to exit main loop
+            self.running = False
+            print("Deregister successful, exiting...")
+        except Exception as e:
+            print(f"❌ Error deregistering user: {e}")
             return
-
-        if not check_ok(message, "response", "deregister-user"):
-            print("deregister unsucessful")
-            return
-
-        print("dergister sucessful")
-        self.running = False
 
     def copy_file(self):
+        """Copy a file to the distributed storage system (DSS)"""
         try:
+            # Get file to copy from user
             print_files_in_directory()
             filename = input("Enter filename to copy: ")
+            print("")
             path = f"./files-copy/{filename}"
             id = generate_id()
             try:
                 file_size = os.path.getsize(path)
 
+            # File not found
             except FileNotFoundError:
                 print("File not found in files-copy directory")
                 return
 
+            # Send copy-file request to manager
             send_message(
                 self.manager_socket,
                 self.manager_address,
@@ -171,102 +217,125 @@ class UserProcess:
                 ),
             )
 
+            # Wait response from manager with id of request
             message = self.events.add_event_and_wait(id, timeout=5)
 
+            # Check if response came in and status is successful
             if message is None:
                 print("❌ Copy file timeout - no response from manager")
                 return
 
-            if not check_ok(message, "response", "copy-file"):
-                print("Copy file unsuccessful: ", message.get("error"))
+            status, error_message = check_ok_message(message, "response", "copy-file")
+
+            if not status:
+                print("Copy file unsuccessful: ", error_message)
                 return
 
+            # Get DSS configuration from manager response
             data = message.get("data", {})
             num_disks = data.get("num_disks")
             striping_unit = data.get("striping_unit")
             disks = data.get("disks", [])
 
-            print(f"📋 Copying file: {filename} ({file_size} bytes)")
-            print(f"   Disks: {num_disks}, Striping unit: {striping_unit}")
-
-            # Calculate number of stripes
-            num_stripes = calculate_num_stripes(file_size, striping_unit, num_disks)
-            print(f"   Total stripes: {num_stripes}")
-
-            # Read file blocks
-            reader = read_blocks_from_file(path, striping_unit)
-
-            block_index = 0
-            for stripe_index in range(num_stripes):
-                print(f"\n📦 Processing stripe {stripe_index + 1}/{num_stripes}")
-
-                # Read (num_disks - 1) data blocks for this stripe
-                blocks_data = []
-                for disk_idx in range(num_disks - 1):
-                    try:
-                        block = next(reader)
-                        blocks_data.append(block)
-                    except StopIteration:
-                        # End of file reached - pad remaining blocks with nulls
-                        null_block = b"\x00" * striping_unit
-                        blocks_data.append(null_block)
-
-                # If we didn't get any blocks, we're done
-                if not blocks_data:
-                    print(f"ℹ️  No more data to process")
-                    break
-
-                # Calculate parity block
-                parity_block = calculate_parity(blocks_data)
-
-                # Insert parity at rotating position
-                parity_index = stripe_index % num_disks
-                blocks_data.insert(parity_index, parity_block)
-
-                # Send each block to corresponding disk
-                threads = []
-                for disk_idx, block_data in enumerate(blocks_data):
-                    # Make sure we have a corresponding disk
-                    if disk_idx >= len(disks):
-                        print(f"⚠️  Warning: No disk for block index {disk_idx}")
-                        continue
-
-                    disk = disks[disk_idx]
-                    block_type = "parity" if disk_idx == parity_index else "data"
-
-                    t = threading.Thread(
-                        target=self.send_block,
-                        args=(
-                            block_data,
-                            block_index,
-                            block_type,
-                            stripe_index,
-                            num_stripes,
-                            filename,
-                            disk,
-                        ),
-                    )
-                    t.start()
-                    threads.append(t)
-                    block_index += 1
-
-                # Wait for all blocks in this stripe to be sent
-                for t in threads:
-                    t.join()
-
-            print(f"\n✅ File '{filename}' copied successfully to DSS")
+            # send file to DSS
+            self.send_file(filename, path, file_size, num_disks, striping_unit, disks)
 
             # Notify manager that copy is complete
+            id = generate_id()
             send_message(
                 self.manager_socket,
                 self.manager_address,
-                ok_response(
-                    "copy-complete", {"file-name": filename, "owner": self.name}
+                ok_request(
+                    "copy-complete", {}, id=id
                 ),
             )
+
+            response = self.events.add_event_and_wait(id, timeout=5)
+
+            if response is None:
+                print("❌ Copy complete timeout - no response from manager")
+                return
+            
+            if not check_ok(response, "response", "copy-complete"):
+                print("❌ Copy complete unsuccessful: ", response.get("error"))
+                return
+            
+            print("✅ Copy complete successful")
         except Exception as e:
             print(f"❌ Error copying file '{filename}': {e}")
             return
+
+    def send_file(self, filename, path, file_size, num_disks, striping_unit, disks):
+        """Send file to DSS using RAID 5 striping with parity"""
+
+        print("\n--- Starting file copy process ---")
+        print(f"📋 Copying file: {filename} ({file_size} bytes)")
+        print(f"   Disks: {num_disks}, Striping unit: {striping_unit}")
+
+        # Calculate number of stripes
+        num_stripes = calculate_num_stripes(file_size, striping_unit, num_disks)
+        print(f"   Total stripes: {num_stripes}")
+
+        # Read file blocks
+        reader = read_blocks_from_file(path, striping_unit)
+
+        block_index = 0
+
+        # Process each stripe
+        for stripe_index in range(num_stripes):
+            print(f"\n📦 Sending stripe {stripe_index + 1}/{num_stripes}")
+
+            # Read (num_disks - 1) data blocks for this stripe
+            blocks_data = []
+            for disk_idx in range(num_disks - 1):
+                try:
+                    block = next(reader)
+                    blocks_data.append(block)
+                except StopIteration:
+                    # End of file reached - pad remaining blocks with nulls
+                    null_block = b"\x00" * striping_unit
+                    blocks_data.append(null_block)
+
+            # If we didn't get any blocks, we're done
+            if not blocks_data:
+                print(f"ℹ️  No more data to process")
+                break
+
+            # Calculate parity block
+            parity_block = calculate_parity(blocks_data)
+
+            # Insert parity at rotating position
+            parity_index = stripe_index % num_disks
+            blocks_data.insert(parity_index, parity_block)
+
+            # Send each block to corresponding disk
+            threads = []
+            for disk_idx, block_data in enumerate(blocks_data):
+                disk = disks[disk_idx]
+                block_type = "parity" if disk_idx == parity_index else "data"
+
+                # Start a thread to send the block
+                t = threading.Thread(
+                    target=self.send_block,
+                    args=(
+                        block_data,
+                        block_index,
+                        block_type,
+                        stripe_index,
+                        num_stripes,
+                        filename,
+                        disk,
+                    ),
+                )
+                t.start()
+                threads.append(t)
+                block_index += 1
+
+            # Wait for all blocks in this stripe to be sent
+            for t in threads:
+                t.join()
+
+        print(f"\n✅ File '{filename}' copied successfully to DSS")
 
     def send_block(
         self,
@@ -278,10 +347,15 @@ class UserProcess:
         filename,
         disk,
     ):
+        """Send a block to a disk in the DSS"""
         disk_addr = (disk.get("ip"), disk.get("c_port"))
         id = generate_id()
         event = self.events.add_event(id)
+        # split block into chunks
         chunks = split_block_into_chunks(block_data)
+        print(f"\n--- Sending block {block_index} in {len(chunks)} chunks ---")
+
+        # Send copy-block request to disk
         send_message(
             self.command_socket,
             disk_addr,
@@ -298,15 +372,18 @@ class UserProcess:
                 id=id,
             ),
         )
+        # Wait for copy-block response - indicates disk is ready for chunks
         event.wait()
         response = self.events.get_event_data(id)
 
+        # Check if response came in and status is successful
         if response is None or not check_ok(response, "response", "copy-block"):
             print(
                 f"❌ Error sending block {block_index} of file '{filename}' to disk {disk.get('name')}"
             )
             return
 
+        # Send each chunk to disk
         for chunk_index, chunk in enumerate(chunks):
             chunk_id = generate_id()
             send_message(
@@ -324,16 +401,14 @@ class UserProcess:
                 ),
             )
 
-        print(
-            f"✅ Sent block {block_index} ({block_type}) of file '{filename}' to disk {disk.get('name')}"
-        )
-
     def read_file(self):
+        """Read a file from the distributed storage system (DSS)"""
         try:
             dss_name = input("Enter DSS name to read from: ")
             filename = input("Enter filename to read: ")
             id = generate_id()
 
+            # Send read-file request to manager
             send_message(
                 self.manager_socket,
                 self.manager_address,
@@ -348,6 +423,7 @@ class UserProcess:
                 ),
             )
 
+            # Wait response from manager with id of request
             message = self.events.add_event_and_wait(id, timeout=5)
 
             if message is None:
@@ -358,7 +434,11 @@ class UserProcess:
                 print("❌ Read file unsuccessful: ", message.get("error"))
                 return
 
-            print(f"✅ Read file '{filename}' from DSS '{dss_name}' successful")
+            print(
+                f"\n✅ File data retrieved for file '{filename}' from DSS '{dss_name}' successful"
+            )
+
+            # Get DSS configuration from manager response and other data needed to read file
             message_data = message.get("data", {})
             file_size = message_data.get("file-size")
             num_disks = message_data.get("num_disks")
@@ -366,24 +446,68 @@ class UserProcess:
             disks = message_data.get("disks", [])
             num_stripes = calculate_num_stripes(file_size, striping_unit, num_disks)
 
+            # Read the file from DSS - get all stripe data back
             all_stripe_data = self.read_file_helper(
                 filename, file_size, num_stripes, disks, num_disks, False
             )
 
             print(f"\n✅ File '{filename}' read completed")
 
-            # Write the reconstructed file
+            # Reconstructed file and compare
             construct_read_file("./files-read", filename, all_stripe_data, file_size)
             compare_files(f"./files-copy/{filename}", f"./files-read/{filename}")
+
+            # Notify manager that read is complete
+            id = generate_id()
+            send_message(
+                self.manager_socket,
+                self.manager_address,
+                ok_response(
+                    "read-complete",
+                    { "dss-name": dss_name},
+                    id=id,
+                ),
+            )
+
+            response = self.events.add_event_and_wait(id, timeout=5)
+
+            if response is None:
+                print("❌ Read complete timeout - no response from manager")
+                return
+
+            if not check_ok(response, "response", "read-complete"):
+                print("❌ Read complete unsuccessful: ", response.get("error"))
+                return
+
+            print("✅ Read complete successful")
+
 
         except Exception as e:
             print(f"❌ Error reading file: {e}")
             return
 
     def read_file_helper(
-        self, filename, file_size, num_stripes, disks, num_disks, reconstruct
+        self,
+        filename,
+        file_size,
+        num_stripes,
+        disks,
+        num_disks,
+        reconstruct,
+        failed_disk=None,
     ):
+        """Read file from DSS - 2 modes
+
+        Modes:
+        - Normal Read: reconstruct=False, failed_disk=None
+            Reads all blocks from all disks, verifies data integrity with parity.
+            Retries reading stripes until data integrity is confirmed.
+        - Reconstruction Read: reconstruct=True, failed_disk=<disk_name>
+            Skips reading from the failed disk and reconstructs missing blocks using parity.
+        """
+
         print(f"📋 Reading file: {filename} ({file_size} bytes)")
+        # Initialize storage for file data if not already present
         self.files_data[filename] = {}
 
         # List to store all stripe data for file reconstruction
@@ -392,15 +516,27 @@ class UserProcess:
         # List to store reconstructed blocks to send after all reads complete
         reconstructed_blocks = []
 
+        # Determine the index of the missing disk if in reconstruct mode
+        missing_disk_idx = disks.index(failed_disk) if failed_disk else None
+
+        # Iterate through each stripe in the file
         for stripe_index in range(num_stripes):
             print(f"\n📦 Reading stripe {stripe_index + 1}/{num_stripes}")
             data_incorrect = True
 
+            # Retry reading stripes until data integrity is confirmed
             while data_incorrect:
-                stripe_blocks = {}  # Use dictionary, not list
+                stripe_blocks = {}
                 threads = []
 
+                # Iterate through all disks with their original indices
                 for disk_index, disk in enumerate(disks):
+                    # Skip the failed disk if we're in reconstruct mode
+                    if reconstruct and disk_index == missing_disk_idx:
+                        print(f"   Skipping failed disk at index {disk_index}")
+                        continue
+
+                    # Start a thread to read the block
                     t = threading.Thread(
                         target=self.read_block,
                         args=(
@@ -408,30 +544,23 @@ class UserProcess:
                             stripe_index,
                             filename,
                             disk_index,
-                            stripe_blocks,  # Pass dict to store result
+                            stripe_blocks,
                         ),
                     )
                     t.start()
                     threads.append(t)
 
+                # Wait for all reads to complete
                 for t in threads:
                     t.join()
 
-                # Count missing blocks
-                missing_blocks = [
-                    disk_idx
-                    for disk_idx in range(num_disks)
-                    if stripe_blocks.get(disk_idx) is None
-                ]
-
                 # If reconstruct mode and exactly one block is missing, reconstruct it
-                if reconstruct and len(missing_blocks) == 1:
-                    missing_disk_idx = missing_blocks[0]
+                if reconstruct:
                     print(
                         f"🔧 Reconstructing missing block from disk {missing_disk_idx}"
                     )
 
-                    # Collect all available blocks IN DISK ORDER (important for XOR)
+                    # Collect all available blocks IN DISK ORDER - needed for XOR
                     available_blocks = []
                     available_block_info = []
                     for disk_idx in range(num_disks):
@@ -444,12 +573,13 @@ class UserProcess:
                                     (disk_idx, block_type, block_index)
                                 )
 
-                    print(
-                        f"   Debug reconstruction: Available blocks from disks: {[info[0] for info in available_block_info]}"
-                    )
-                    print(
-                        f"   Debug reconstruction: Block types: {[info[1] for info in available_block_info]}"
-                    )
+                    # Check if we have enough blocks to reconstruct
+                    if len(available_blocks) < num_disks - 1:
+                        print(
+                            f"❌ Not enough blocks to reconstruct (got {len(available_blocks)}, need {num_disks - 1}), retrying..."
+                        )
+                        data_incorrect = True
+                        continue
 
                     # XOR all available blocks to reconstruct the missing one
                     reconstructed_block = calculate_parity(available_blocks)
@@ -457,24 +587,11 @@ class UserProcess:
                     # Determine the type and index of the reconstructed block
                     # The missing block is either data or parity
                     parity_position = stripe_index % num_disks
+                    reconstructed_index = stripe_index * num_disks + missing_disk_idx
                     if missing_disk_idx == parity_position:
                         reconstructed_type = "parity"
-                        # Calculate block_index for parity block
-                        reconstructed_index = (
-                            stripe_index * num_disks + missing_disk_idx
-                        )
                     else:
                         reconstructed_type = "data"
-                        # Calculate block_index for data block
-                        reconstructed_index = (
-                            stripe_index * num_disks + missing_disk_idx
-                        )
-
-                    # Store reconstructed block info to send after all reads complete
-                    failed_disk = disks[missing_disk_idx]
-                    print(
-                        f"💾 Storing reconstructed block (type={reconstructed_type}, index={reconstructed_index}) for {failed_disk.get('name')}"
-                    )
 
                     reconstructed_blocks.append(
                         {
@@ -496,24 +613,9 @@ class UserProcess:
 
                     print(f"✅ Block reconstructed for disk {missing_disk_idx}")
 
-                # If not in reconstruct mode and blocks are missing, fail
-                if not reconstruct and len(missing_blocks) > 0:
-                    print(f"❌ Missing blocks for stripe {stripe_index}, retrying...")
-                    data_incorrect = True
-                    continue
-
-                # If in reconstruct mode and more than 1 block is missing, fail
-                if reconstruct and len(missing_blocks) > 1:
-                    print(
-                        f"❌ Cannot reconstruct: {len(missing_blocks)} blocks missing (only 1 can be recovered)"
-                    )
-                    data_incorrect = True
-                    continue
-
                 # Separate parity block from data blocks
                 parity_block = None
                 data_blocks_dict = {}  # Use dict to track block_index -> block_data
-                parity_disk_index = None
 
                 for disk_idx, block_info in stripe_blocks.items():
                     if block_info is None:
@@ -522,7 +624,6 @@ class UserProcess:
                     block_data, block_type, block_index = block_info
                     if block_type == "parity":
                         parity_block = block_data
-                        parity_disk_index = disk_idx
                     else:
                         data_blocks_dict[block_index] = block_data
 
@@ -531,49 +632,9 @@ class UserProcess:
                     data_blocks_dict[i] for i in sorted(data_blocks_dict.keys())
                 ]
 
-                # Debug: Show block order for parity check
-                if reconstruct:
-                    print(
-                        f"   Debug parity check: Data block indices: {sorted(data_blocks_dict.keys())}"
-                    )
-                    print(f"   Debug parity check: Parity disk: {parity_disk_index}")
-
-                # Simulate random bit flip during normal reads (not reconstruction)
-                if not reconstruct and random.random() < 0.10:  # 10% chance
-                    # Pick a random block to corrupt (could be data or parity)
-                    all_blocks = (
-                        data_blocks + [parity_block] if parity_block else data_blocks
-                    )
-                    if all_blocks:
-                        corrupt_idx = random.randint(0, len(all_blocks) - 1)
-                        block_to_corrupt = all_blocks[corrupt_idx]
-
-                        if len(block_to_corrupt) > 0:
-                            # Convert to bytearray to modify
-                            corrupted_block = bytearray(block_to_corrupt)
-                            # Pick a random byte and bit position
-                            byte_pos = random.randint(0, len(corrupted_block) - 1)
-                            bit_pos = random.randint(0, 7)
-                            # Flip the bit
-                            corrupted_block[byte_pos] ^= 1 << bit_pos
-
-                            # Replace the block with corrupted version
-                            if corrupt_idx < len(data_blocks):
-                                data_blocks[corrupt_idx] = bytes(corrupted_block)
-                                print(
-                                    f"🔥 CORRUPTED: Flipped bit {bit_pos} in byte {byte_pos} of data block {corrupt_idx}"
-                                )
-                            else:
-                                parity_block = bytes(corrupted_block)
-                                print(
-                                    f"🔥 CORRUPTED: Flipped bit {bit_pos} in byte {byte_pos} of parity block"
-                                )
-
-                # Debug: Print block info
-                if reconstruct:
-                    print(
-                        f"   Debug: parity_disk={parity_disk_index}, data_blocks={len(data_blocks)}, missing={missing_blocks}"
-                    )
+                data_blocks, parity_block = self.simulate_bit_flip(
+                    data_blocks, parity_block, reconstruct
+                )
 
                 # Check if we have all blocks
                 if parity_block is None or len(data_blocks) != num_disks - 1:
@@ -625,11 +686,43 @@ class UserProcess:
 
         return all_stripe_data
 
+    def simulate_bit_flip(self, data_blocks, parity_block, reconstruct):
+        """Simulate random bit flip in one of the blocks with 10% chance"""
+        # Simulate random bit flip during normal reads (not reconstruction)
+        if not reconstruct and random.random() < 0.10:  # 10% chance
+            # Pick a random block to corrupt (could be data or parity)
+            all_blocks = data_blocks + [parity_block] if parity_block else data_blocks
+            corrupt_idx = random.randint(0, len(all_blocks) - 1)
+            block_to_corrupt = all_blocks[corrupt_idx]
+
+            # Convert to bytearray to modify
+            corrupted_block = bytearray(block_to_corrupt)
+            # Pick a random byte and bit position
+            byte_pos = random.randint(0, len(corrupted_block) - 1)
+            bit_pos = random.randint(0, 7)
+            # Flip the bit
+            corrupted_block[byte_pos] ^= 1 << bit_pos
+
+            # Replace the block with corrupted version
+            if corrupt_idx < len(data_blocks):
+                data_blocks[corrupt_idx] = bytes(corrupted_block)
+                print(
+                    f"🔥 CORRUPTED: Flipped bit {bit_pos} in byte {byte_pos} of data block {corrupt_idx}"
+                )
+            else:
+                parity_block = bytes(corrupted_block)
+                print(
+                    f"🔥 CORRUPTED: Flipped bit {bit_pos} in byte {byte_pos} of parity block"
+                )
+        return data_blocks, parity_block
+
     def read_block(self, disk, stripe_index, filename, disk_index, result_dict):
         """Read a block from a disk and store result in result_dict"""
         disk_addr = (disk.get("ip"), disk.get("c_port"))
         id = generate_id()
         event = self.events.add_event(id)
+
+        # Send read-block request to disk
         send_message(
             self.command_socket,
             disk_addr,
@@ -643,8 +736,10 @@ class UserProcess:
             ),
         )
         event.wait()
+        # Get read-block response
         response = self.events.get_event_data(id)
 
+        # Check if response came in and status is successful
         if response is None or not check_ok(response, "response", "read-block"):
             print(
                 f"❌ Error reading stripe {stripe_index} of file '{filename}' from disk {disk.get('name')}"
@@ -652,12 +747,13 @@ class UserProcess:
             result_dict[disk_index] = None
             return
 
+        # Extract block metadata from response
         data = response.get("data", {})
         block_type = data.get("block-type")
         block_index = data.get("block-index")
         num_chunks = data.get("num-chunks")
 
-        # Use block_index as storage key (globally unique across entire file)
+        # Use block_index to store chunks
         if filename not in self.files_data:
             self.files_data[filename] = {}
 
@@ -668,7 +764,7 @@ class UserProcess:
         }
 
         finish_id = generate_id()
-
+        # Send read-chunks request to disk - disk will respond with chunks
         send_message(
             self.command_socket,
             disk_addr,
@@ -684,14 +780,15 @@ class UserProcess:
             ),
         )
 
+        # Wait for read-chunks response indicating all chunks sent
         message = self.events.add_event_and_wait(finish_id, timeout=10)
 
+        # Check if response came in and status is successful
         if message is None or not check_ok(message, "response", "read-chunks"):
             print("❌ Read chunks timeout - no response from disk OR error")
             result_dict[disk_index] = None
             return
 
-        # Reconstruct block from chunks using block_index as key
         chunks_list = self.files_data[filename][block_index]["chunks"]
 
         # Check if all chunks were received
@@ -711,9 +808,12 @@ class UserProcess:
         result_dict[disk_index] = (block, block_type, block_index)
 
     def disk_failure(self):
+        """Simulate a disk failure in the DSS and reconstruct data"""
         try:
             dss_name = input("Enter DSS name: ")
             id = generate_id()
+
+            # Send disk-failure request to manager
             send_message(
                 self.manager_socket,
                 self.manager_address,
@@ -725,9 +825,10 @@ class UserProcess:
                     id=id,
                 ),
             )
-
+            # Wait response from manager with id of request
             message = self.events.add_event_and_wait(id, timeout=5)
 
+            # Check if response came in and status is successful
             if message is None:
                 print("❌ Disk failure timeout - no response from manager")
                 return
@@ -736,6 +837,7 @@ class UserProcess:
                 print("Disk failure unsuccessful: ", message.get("error"))
                 return
 
+            # Get DSS configuration from manager response
             data = message.get("data", {})
             disks = data.get("disks", [])
             striping_unit = data.get("striping_unit")
@@ -743,6 +845,7 @@ class UserProcess:
             files = data.get("files", [])
             failed_disk = random.choice(disks)
 
+            # Simulate disk failure on the chosen disk
             print(f"\n💥 Failing disk: {failed_disk.get('name')}")
             response = self.fail_disk(failed_disk)
             if not response:
@@ -751,25 +854,54 @@ class UserProcess:
 
             print(f"\n🔧 Starting reconstruction for {len(files)} file(s)...")
 
+            # Reconstruct each file in the DSS
             for file in files:
                 filename = file.get("file-name")
                 file_size = file.get("file-size")
                 print(f"\n📋 Reconstructing file '{filename}' ({file_size} bytes)")
 
-                # Calculate number of stripes for this file
                 num_stripes = calculate_num_stripes(file_size, striping_unit, num_disks)
 
                 # Read file with reconstruction enabled
                 all_stripe_data = self.read_file_helper(
-                    filename, file_size, num_stripes, disks, num_disks, reconstruct=True
+                    filename,
+                    file_size,
+                    num_stripes,
+                    disks,
+                    num_disks,
+                    reconstruct=True,
+                    failed_disk=failed_disk,
                 )
 
                 print(f"✅ File '{filename}' reconstructed successfully")
+
+            id = generate_id()
+            # Notify manager that disk failure handling is complete
+            send_message(
+                self.manager_socket,
+                self.manager_address,
+                ok_request(
+                    "recovery-complete",
+                    { "dss-name": dss_name },
+                    id=id,
+                ),
+            )
+
+            response = self.events.add_event_and_wait(id, timeout=5)
+            if response is None:
+                print("❌ Failure complete timeout - no response from manager")
+                return
+            if not check_ok(response, "response", "recovery-complete"):
+                print("❌ Failure complete unsuccessful: ", response.get("error"))
+                return
+            print("✅ Disk failure complete")
+
         except Exception as e:
             print(f"❌ Error during disk failure handling: {e}")
             return
 
     def fail_disk(self, disk):
+        """Send fail command to disk to simulate failure"""
         disk_addr = (disk.get("ip"), disk.get("c_port"))
         id = generate_id()
         send_message(
@@ -794,30 +926,156 @@ class UserProcess:
 
         return True
 
+    def ls(self):
+        """List files in the DSS"""
+        try:
+            id = generate_id()
+            send_message(
+                self.manager_socket,
+                self.manager_address,
+                ok_request(
+                    "ls",
+                    {},
+                    id=id,
+                ),
+            )
+
+            # Wait for response from manager
+            response = self.events.add_event_and_wait(id, timeout=5)
+
+            # Check if response came in and status is successful
+            if response is None:
+                print("No list files message recieved from manager")
+                return
+
+            if not check_ok(response, "response", "ls"):
+                print("Failed to list files : ", response.get("error"))
+                return
+
+            data = response.get("data", {})
+
+            # ls-data is a dictionary where keys are DSS names and values are DSS configs
+            if isinstance(data, dict):
+                for dss_name, dss_config in data.items():
+                    # dss_config contains: dss-name, n, disks, striping-unit, files
+                    num_disks = dss_config.get("n")
+                    striping_unit = dss_config.get("striping-unit")
+                    disks_list = dss_config.get("disks", [])
+                    files = dss_config.get("files", [])
+
+                    # Handle disks_list being either strings or dicts
+                    if disks_list:
+                        disk_names = ", ".join(
+                            d.get("name", "unknown") if isinstance(d, dict) else str(d)
+                            for d in disks_list
+                        )
+                    else:
+                        disk_names = ""
+
+                    if striping_unit is None:
+                        su_str = "unknown"
+                    else:
+                        # Display striping unit in KB (1 KB = 1024 bytes).
+                        if isinstance(striping_unit, int) and striping_unit % 1024 == 0:
+                            su_str = f"{striping_unit // 1024} KB"
+                        else:
+                            su_str = f"{striping_unit / 1024:.2f} KB"
+
+                    print(
+                        f"{dss_name}: Disk array with n={num_disks} ({disk_names}) with striping-unit {su_str}."
+                    )
+
+                    # Print files in this DSS
+                    if files:
+                        for f in files:
+                            if isinstance(f, dict):
+                                fname = f.get("file-name", "unknown")
+                                fsize = f.get("file-size", 0) or 0
+                                owner = f.get("owner", "unknown")
+                                print(f"  {fname}       {int(fsize):,} B       {owner}")
+
+            else:
+                print("No DSS configurations found")
+        except Exception as e:
+            print(f"❌ Error listing files: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return
+
+    def decomission_dss(self):
+        """Decomission a DSS"""
+        try:
+            dss_name = input("Enter DSS name to decommission: ")
+            id = generate_id()
+
+            # Send decomission-dss request to manager
+            send_message(
+                self.manager_socket,
+                self.manager_address,
+                ok_request(
+                    "decomission-dss",
+                    {
+                        "dss-name": dss_name,
+                    },
+                    id=id,
+                ),
+            )
+            # Wait response from manager with id of request
+            message = self.events.add_event_and_wait(id, timeout=5)
+
+            # Check if response came in and status is successful
+            if message is None:
+                print("❌ Decomission DSS timeout - no response from manager")
+                return
+
+            if not check_ok(message, "response", "decomission-dss"):
+                print("Decomission DSS unsuccessful: ", message.get("error"))
+                return
+
+            print("Decomission DSS successful")
+
+            id = generate_id()
+            # Notify manager that decomissioning is complete
+        except Exception as e:
+            print(f"❌ Error during decomissioning DSS: {e}")
+            return
+
+    # main loop
     def start(self):
+        """Start the user process"""
         # Start the manager port listener thread
         threading.Thread(target=self.handle_manager_port, daemon=True).start()
-        # Start the command port listener thread for disk responses
+        # Start the command port listener thread
         threading.Thread(target=self.handle_command_port, daemon=True).start()
 
         with self.manager_socket, self.command_socket:
             while self.running:
                 print_commands()
-                command = input("input command:")
+                command = input("input command: ")
+                print("")
 
                 match command:
-                    case "1":
+                    case "exit":
                         self.deregister_user()
-                    case "2":
+                    case "1":
                         self.configure_dss()
-                    case "3":
+                    case "2":
                         self.copy_file()
-                    case "4":
+                    case "3":
                         self.read_file()
-                    case "5":
+                    case "4":
                         self.disk_failure()
+                    case "5":
+                        self.ls()
+                    case "6":
+                        self.decomission_dss()
+                    case "help":
+                        continue
                     case _:
-                        print("Unkown Command")
+                        print("Unknown Command")
+
+                print("")
 
     def handle_read_chunk(self, message, addr):
         """Handle store-chunk request"""
@@ -850,6 +1108,7 @@ class UserProcess:
                 self.events.set_event(id, message)
                 continue
 
+            # Handle messages
             match type, action:
                 case "response", "read-chunk":
                     self.handle_read_chunk(message, addr)
@@ -871,17 +1130,19 @@ class UserProcess:
                 message.get("id"),
             )
 
+            # Check if this is a response to a waiting event
             if self.events.event_exists(id):
                 self.events.set_event(id, message)
                 continue
 
+            # Handle messages
             match type, action:
                 case _:
                     print(f"❌ Unknown message ({type}, {action}) from manager")
 
 
 def main():
-
+    # Parse command line arguments
     name, ip, m_port, c_port, manager_address = user_command_line_args()
 
     # Create and start user process

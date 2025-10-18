@@ -1,0 +1,13 @@
+Start Disks
+--- ---
+start-disks.sh 31501 alpha bravo charlie
+start-disks.sh 31507 delta echo foxtrot
+
+Start Users 
+--- ---
+user.py -n sudo -m 31513 -c 31514
+user.py -n user -m 31517 -c 31518
+
+Start Manager
+--- ---
+manager.py

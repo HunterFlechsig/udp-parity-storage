@@ -37,6 +37,7 @@ def user_command_line_args():
     args = sys.argv[1:]
     options = "hn:i:m:c:M:P:h"
 
+    # Parse command line arguments
     try:
         arguments, values = getopt.getopt(args, options)
         for currentArg, currentVal in arguments:
@@ -99,6 +100,7 @@ def manager_command_line_args():
     args = sys.argv[1:]
     options = "hi:p:h"
 
+    # Parse command line arguments
     try:
         arguments, values = getopt.getopt(args, options)
         for currentArg, currentVal in arguments:
@@ -109,9 +111,12 @@ def manager_command_line_args():
                     " -p: Port number to bind the manager to (default: 31500) \n"
                 )
                 sys.exit(0)
+
     except getopt.error as err:
         print(str(err))
         sys.exit(1)
+
+    # Validate port ranges
 
     if ip is None or port is None:
         print("❌ Error: Missing required arguments:")
@@ -137,6 +142,8 @@ def disk_command_line_args():
 
     args = sys.argv[1:]
     options = "hn:i:m:c:M:P:h"
+
+    # Parse command line arguments
 
     try:
         arguments, values = getopt.getopt(args, options)
@@ -217,18 +224,22 @@ def create_message(command, type, data=None, error=None, status=None, id=None):
     else:
         message["id"] = uuid.uuid4().hex
 
+    # create JSON string and encode to bytes
     return json.dumps(message).encode("utf-8")
 
 
 def ok_request(command, data=None, id=None):
+    """ create a successful request message """
     return create_message(command, "request", data=data, status="SUCCESS", id=id)
 
 
 def error_response(command, error, id=None):
+    """ create an error response message """
     return create_message(command, "response", error=error, status="FAILURE", id=id)
 
 
 def ok_response(command, data=None, id=None):
+    """ create a successful response message """
     return create_message(command, "response", data=data, status="SUCCESS", id=id)
 
 
@@ -237,7 +248,7 @@ def recieve_message(socket, timeout=1):
     data, selected_sockets, errors = select.select([socket], [], [], timeout)
     if not data:
         return None, None
-    message, address = socket.recvfrom(1048576 * 2)  # 2 MB buffer
+    message, address = socket.recvfrom(32768 * 2)  # 64 KB buffer
     decoded_message = json.loads(message.decode("utf-8"))
     print(
         "📬 Received ",
@@ -269,6 +280,7 @@ def send_message(sock, addr, message):
 
 
 def check_ok(message, type, action):
+    """ Check if a message is an OK message of the expected type and action """
     if (
         message.get("status") == "SUCCESS"
         and message.get("type") == type
@@ -279,37 +291,32 @@ def check_ok(message, type, action):
 
 
 import threading
-
-
 class ThreadEvents:
+    """ Class to manage threading events with associated data """
     def __init__(self):
         self.events = {}
         self.data = {}
 
     def add_event(self, id):
+        """ Add a new event with the given id """
         self.events[id] = threading.Event()
         return self.events[id]
 
     def set_event(self, id, data):
+        """ Set the event with the given id and store associated data """
         try:
             self.events[id].set()
             self.data[id] = data
-        except:
+        except KeyError:
             print("Event doesnt exist")
 
     def get_event_data(self, id):
+        """ Get the data associated with an event """
         return self.data.get(id)
 
     def add_event_and_wait(self, id, timeout=None):
         """
         Add an event and wait for it to be set.
-
-        Args:
-            id: Event identifier
-            timeout: Maximum time to wait in seconds (None = wait forever)
-
-        Returns:
-            Event data if received, None if timeout
         """
         event = self.add_event(id)
         success = event.wait(timeout)
@@ -322,10 +329,12 @@ class ThreadEvents:
         return self.get_event_data(id)
 
     def event_exists(self, id):
+        """ Check if an event with the given id exists """
         return id in self.events
 
 
 def generate_id():
+    """ Generate a unique identifier """
     return uuid.uuid4().hex
 
 
@@ -334,12 +343,10 @@ def check_striping_unit(striping_unit):
     Check if striping unit is a power of two between 128 bytes and 1 MB.
     """
     # Check if it's in the valid range (128 bytes to 1 MB)
-    if striping_unit < 128 or striping_unit > 1048576:  # 1 MB = 1024 * 1024
+    if striping_unit < 128 or striping_unit > 1048576:
         return False
 
     # Check if it's a power of two
-    # A number is a power of two if it has only one bit set
-    # This can be checked by: n & (n-1) == 0
     if striping_unit & (striping_unit - 1) != 0:
         return False
 
@@ -347,6 +354,7 @@ def check_striping_unit(striping_unit):
 
 
 def print_files_in_directory(directory="./files-copy"):
+    """ Print all files in the specified directory """
     print("files:")
     print("--- ---")
     for f in os.listdir(directory):
@@ -408,6 +416,7 @@ def calculate_parity(blocks):
 
 
 def calculate_num_chunks(block_size, chunk_size=chunk_size):
+    """ Calculate the number of chunks needed for a block of given size """
     return math.ceil(block_size / chunk_size)
 
 
@@ -492,7 +501,6 @@ def check_ok_message(message, expected_type, expected_action):
     Check if a message has status 'ok', and matches expected type and action.
 
     """
-
     if (
         not message.get("type") == expected_type
         and not message.get("action") == expected_action

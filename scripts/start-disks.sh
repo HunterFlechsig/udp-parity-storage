@@ -15,6 +15,11 @@ if ! command -v tmux &> /dev/null; then
     exit 1
 fi
 
+# Get the directory where the script is located and go to parent directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR" || exit 1
+
 # Get starting port
 STARTING_PORT=$1
 shift  # Remove first argument, leaving only disk names
@@ -52,7 +57,7 @@ if [ "$C_PORT" -gt 31999 ]; then
 fi
 
 echo "Creating tmux session with disk: $DISK_NAME (M:$M_PORT, C:$C_PORT)"
-tmux new-session -d -s "$SESSION_NAME" "python3 disk.py -n $DISK_NAME -i $DISK_IP -m $M_PORT -c $C_PORT -M $MANAGER_IP -P $MANAGER_PORT"
+tmux new-session -d -s "$SESSION_NAME" -c "$PROJECT_DIR" "python3 disk.py -n $DISK_NAME -i $DISK_IP -m $M_PORT -c $C_PORT -M $MANAGER_IP -P $MANAGER_PORT; read -p 'Press enter to close...'"
 
 # Split horizontally for remaining disks
 for ((i=1; i<NUM_DISKS; i++)); do
@@ -68,7 +73,7 @@ for ((i=1; i<NUM_DISKS; i++)); do
     fi
     
     echo "Adding disk: $DISK_NAME (M:$M_PORT, C:$C_PORT)"
-    tmux split-window -h -t "$SESSION_NAME" "python3 disk.py -n $DISK_NAME -i $DISK_IP -m $M_PORT -c $C_PORT -M $MANAGER_IP -P $MANAGER_PORT"
+    tmux split-window -h -t "$SESSION_NAME" -c "$PROJECT_DIR" "python3 disk.py -n $DISK_NAME -i $DISK_IP -m $M_PORT -c $C_PORT -M $MANAGER_IP -P $MANAGER_PORT; read -p 'Press enter to close...'"
     tmux select-layout -t "$SESSION_NAME" even-horizontal
 done
 

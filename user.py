@@ -337,6 +337,7 @@ class UserProcess:
 
         print(f"\n✅ File '{filename}' copied successfully to DSS")
 
+    # thread to send a block to a disk
     def send_block(
         self,
         block_data,
@@ -716,6 +717,7 @@ class UserProcess:
                 )
         return data_blocks, parity_block
 
+    # thread to read a block from a disk
     def read_block(self, disk, stripe_index, filename, disk_index, result_dict):
         """Read a block from a disk and store result in result_dict"""
         disk_addr = (disk.get("ip"), disk.get("c_port"))

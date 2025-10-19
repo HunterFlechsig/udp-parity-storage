@@ -1,11 +1,24 @@
 #!/bin/bash
 # Script to start multiple disk processes with automatic port assignment in tmux
-# Usage: ./start-disks.sh <starting_port> <disk_name1> <disk_name2> ...
+# Usage: ./start-disks.sh <starting_port> <disk_name1> <disk_name2> ... [-i disk_ip] [-M manager_ip] [-P manager_port]
 # Example: ./start-disks.sh 31501 disk1 disk2 disk3
+# Example: ./start-disks.sh 31501 disk1 disk2 -i 192.168.1.100 -M 192.168.1.50 -P 31500
 
+# Default values
+DISK_IP="127.0.0.1"
+MANAGER_IP="127.0.0.1"
+MANAGER_PORT=31500
+
+# Parse arguments
 if [ "$#" -lt 2 ]; then
-    echo "Usage: $0 <starting_port> <disk_name1> <disk_name2> ..."
+    echo "Usage: $0 <starting_port> <disk_name1> <disk_name2> ... [-i disk_ip] [-M manager_ip] [-P manager_port]"
     echo "Example: $0 31501 disk1 disk2 disk3"
+    echo "Example: $0 31501 disk1 disk2 -i 192.168.1.100 -M 192.168.1.50 -P 31500"
+    echo ""
+    echo "Options:"
+    echo "  -i    IP address for all disks (default: 127.0.0.1)"
+    echo "  -M    Manager IP address (default: 127.0.0.1)"
+    echo "  -P    Manager port (default: 31500)"
     exit 1
 fi
 
@@ -22,11 +35,37 @@ cd "$PROJECT_DIR" || exit 1
 
 # Get starting port
 STARTING_PORT=$1
-shift  # Remove first argument, leaving only disk names
+shift  # Remove first argument
 
-# Store disk names in array
-DISK_NAMES=("$@")
+# Collect disk names and parse options
+DISK_NAMES=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -i)
+            DISK_IP="$2"
+            shift 2
+            ;;
+        -M)
+            MANAGER_IP="$2"
+            shift 2
+            ;;
+        -P)
+            MANAGER_PORT="$2"
+            shift 2
+            ;;
+        *)
+            DISK_NAMES+=("$1")
+            shift
+            ;;
+    esac
+done
+
 NUM_DISKS=${#DISK_NAMES[@]}
+
+if [ "$NUM_DISKS" -lt 1 ]; then
+    echo "Error: At least one disk name is required"
+    exit 1
+fi
 
 # Validate port range (31500-31999)
 if [ "$STARTING_PORT" -lt 31500 ] || [ "$STARTING_PORT" -gt 31999 ]; then
@@ -34,17 +73,18 @@ if [ "$STARTING_PORT" -lt 31500 ] || [ "$STARTING_PORT" -gt 31999 ]; then
     exit 1
 fi
 
-# Manager settings
-MANAGER_IP="127.0.0.1"
-MANAGER_PORT=31500
-
-# Disk IP
-DISK_IP="127.0.0.1"
+if [ "$MANAGER_PORT" -lt 31500 ] || [ "$MANAGER_PORT" -gt 31999 ]; then
+    echo "Error: Manager port must be between 31500 and 31999"
+    exit 1
+fi
 
 # Session name
 SESSION_NAME="disks-$(date +%s)"
 
 echo "Starting $NUM_DISKS disks in tmux with base port $STARTING_PORT..."
+echo "Disk IP: $DISK_IP"
+echo "Manager: $MANAGER_IP:$MANAGER_PORT"
+echo ""
 
 # Create new tmux session with first disk
 DISK_NAME="${DISK_NAMES[0]}"

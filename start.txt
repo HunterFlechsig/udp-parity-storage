@@ -1,13 +1,15 @@
 Start Disks
 --- ---
-start-disks.sh 31501 alpha bravo charlie
-start-disks.sh 31507 delta echo foxtrot
+./start-disks.sh 31501 alpha bravo charlie
+./start-disks.sh 31507 delta echo foxtrot
+
+start-disks Usage: ./scripts/start-disks.sh 31501 [starting port for 3 disks] alpha bravo charlie -i 192.168.1.100[disk-ip] -M 192.168.1.50 -P 31500 [manager ip, port]
 
 Start Users 
 --- ---
-user.py -n sudo -m 31513 -c 31514
-user.py -n user -m 31517 -c 31518
+python3 user.py -n sudo -m 31513 -c 31514
+python3 user.py -n user -m 31517 -c 31518
 
 Start Manager
 --- ---
-manager.py
+python3 manager.py

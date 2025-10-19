@@ -35,7 +35,7 @@ def user_command_line_args():
     manager_port = ports[0]
 
     args = sys.argv[1:]
-    options = "hn:i:m:c:M:P:h"
+    options = "hn:i:m:c:M:P:"
 
     # Parse command line arguments
     try:
@@ -98,7 +98,7 @@ def manager_command_line_args():
     port = 31500
 
     args = sys.argv[1:]
-    options = "hi:p:h"
+    options = "hi:p:"
 
     # Parse command line arguments
     try:
@@ -111,6 +111,10 @@ def manager_command_line_args():
                     " -p: Port number to bind the manager to (default: 31500) \n"
                 )
                 sys.exit(0)
+            elif currentArg in ("-i"):
+                ip = currentVal
+            elif currentArg in ("-p"):
+                port = int(currentVal)
 
     except getopt.error as err:
         print(str(err))
@@ -141,7 +145,7 @@ def disk_command_line_args():
     manager_port = ports[0]
 
     args = sys.argv[1:]
-    options = "hn:i:m:c:M:P:h"
+    options = "hn:i:m:c:M:P:"
 
     # Parse command line arguments
 

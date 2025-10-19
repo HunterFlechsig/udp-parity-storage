@@ -386,12 +386,13 @@ class ManagerProcess:
         owner = data.get("owner")
         filename = data.get("file-name")
         file_size = data.get("file-size")
+        dss_name = data.get("dss-name")
         id = message.get("id")
 
         print("Copying file")
 
         # Check if DSS exists
-        if not self.dss_data:
+        if dss_name not in self.dss_data:
             print("No DSS configured")
             send_message(
                 self.s,
@@ -411,7 +412,7 @@ class ManagerProcess:
             return
 
         # Select a DSS to store the file - gather DSS info
-        dss_name, dss_info = random.choice(list(self.dss_data.items()))
+        dss_info = self.dss_data[dss_name]
 
         # Check if DSS being read
         if self.dss_data[dss_name].get("users_reading") > 0:

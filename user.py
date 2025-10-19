@@ -191,6 +191,7 @@ class UserProcess:
             # Get file to copy from user
             print_files_in_directory()
             filename = input("Enter filename to copy: ")
+            dss_name = input("Enter DSS name to copy to: ")
             print("")
             path = f"./files-copy/{filename}"
             id = generate_id()
@@ -212,6 +213,7 @@ class UserProcess:
                         "owner": self.name,
                         "file-name": filename,
                         "file-size": file_size,
+                        "dss-name": dss_name,
                     },
                     id=id,
                 ),

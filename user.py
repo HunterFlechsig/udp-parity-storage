@@ -1046,6 +1046,7 @@ class UserProcess:
     # main loop
     def start(self):
         """Start the user process"""
+        print(f"🚀 User '{self.name}' started at {self.ip}:{self.m_port}/{self.c_port}")
         # Start the manager port listener thread
         threading.Thread(target=self.handle_manager_port, daemon=True).start()
         # Start the command port listener thread

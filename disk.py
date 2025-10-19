@@ -117,6 +117,7 @@ class DiskProcess:
 
     def start(self):
         """ start disk process """
+        print(f"🚀 Disk '{self.name}' started at {self.ip}:{self.m_port}/{self.c_port}")
 
         # Start the manager port listener thread
         threading.Thread(target=self.handle_manager_port, daemon=True).start()

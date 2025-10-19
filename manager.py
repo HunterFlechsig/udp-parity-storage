@@ -46,6 +46,7 @@ class ManagerProcess:
 
     def start(self):
         """ Start the manager process """
+        print(f"🚀 Manager started at {self.ip}:{self.port}")
         threading.Thread(target=self.command_thread, daemon=True).start() # Start command thread
 
         with self.s:

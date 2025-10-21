@@ -339,7 +339,9 @@ class UserProcess:
 
         print(f"\n✅ File '{filename}' copied successfully to DSS")
 
-    # thread to send a block to a disk
+    # THREAD: thread to send a block to a disk
+    # sends out requests to copy-block then sends out all chunks in a row
+    # to be handled asynchronously by command thread in disk
     def send_block(
         self,
         block_data,
@@ -488,7 +490,7 @@ class UserProcess:
         except Exception as e:
             print(f"❌ Error reading file: {e}")
             return
-
+    
     def read_file_helper(
         self,
         filename,
@@ -719,7 +721,11 @@ class UserProcess:
                 )
         return data_blocks, parity_block
 
-    # thread to read a block from a disk
+    # THREAD: thread to read a block from a disk
+    # send result back via result_dict[disk_index] = (block_data, block_type, block_index)
+    # sends out requests to read-block and read-chunks - chunks handled asynchronously
+    # by command thread before signaling completion via finish-id event to allow block to be reconstructed
+    # and sent back to main thread for processing
     def read_block(self, disk, stripe_index, filename, disk_index, result_dict):
         """Read a block from a disk and store result in result_dict"""
         disk_addr = (disk.get("ip"), disk.get("c_port"))
@@ -1045,7 +1051,9 @@ class UserProcess:
             print(f"❌ Error during decomissioning DSS: {e}")
             return
 
-    # main loop
+    # THREAD: main user thread - handles user input and commands
+    # sends out commands and waits for responses using events - events are set by other threads
+    # that handle incoming messages from manager and disks
     def start(self):
         """Start the user process"""
         print(f"🚀 User '{self.name}' started at {self.ip}:{self.m_port}/{self.c_port}")
@@ -1095,6 +1103,9 @@ class UserProcess:
             chunk_data
         )
 
+    # THREAD: handle message from disks - e.g., read-chunk responses
+    # mostly redirects to waiting events in main thread, also responsible for storing chunk data
+    # asynchronously as it comes in from disks
     def handle_command_port(self):
         """Handle command port (c_port) - receives responses from disks"""
         while self.running:
@@ -1122,6 +1133,8 @@ class UserProcess:
                         f"⚠️  Received unexpected message from {addr}: {action}, id={id}"
                     )
 
+    # THREAD: handle message from manager - e.g., responses to user requests
+    # mostly redirects to waiting events in main thread
     def handle_manager_port(self):
         """Handle manager port (m_port)"""
         while self.running:

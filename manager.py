@@ -91,6 +91,8 @@ class ManagerProcess:
                 except Exception as e:
                     print(f"❌ Error handling message from {addr}: {e}")
 
+    # THREAD: This a thread to handle manager commands from user. Allows user to type commands while manager is listening
+    # for incoming messages or handling them.
     def command_thread(self):
         """ Thread for handling manager commands """
         while self.running:

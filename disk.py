@@ -115,6 +115,7 @@ class DiskProcess:
         print("Deregister successful")
         self.running = False
 
+    # THREAD: main disk thread - handles user input and commands
     def start(self):
         """ start disk process """
         print(f"🚀 Disk '{self.name}' started at {self.ip}:{self.m_port}/{self.c_port}")
@@ -138,6 +139,8 @@ class DiskProcess:
                         print("Unknown Command")
                         print_commands()
 
+    # THREAD: handle message from manager - e.g., register, decomission requests
+    # handles requests directly and sends responses 
     def handle_manager_port(self):
         """Handle manager port (m_port)"""
         # Listen for messages from the manager
@@ -163,6 +166,9 @@ class DiskProcess:
             if message:
                 print(" ")
 
+    # THREAD: handle message from users - e.g., read copy requests
+    # handles requests directly and sends responses 
+    # also sets events for waiting requests in main thread
     def handle_command_port(self):
         """Handle command port (c_port)"""
 

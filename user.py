@@ -1,5 +1,5 @@
 # user.py
-# Hunter Flechsig, 1225292005
+# Hunter Flechsig, 1225292003
 
 import socket
 import threading

@@ -127,13 +127,12 @@ Manager communication and direct client-to-node transfers use separate sockets. 
 │   ├── start-all.sh           # Original local development launcher
 │   └── kill-all.sh            # Stop processes using the project port range
 ├── files-copy/                # Sample input files
-├── docs/
-│   ├── design-report.pdf
-│   └── project-specification.pdf
-└── old_files/                 # Earlier development implementation
+└── docs/
+    ├── design-report.pdf
+    └── project-specification.pdf
 ```
 
-The primary implementation is in [`manager.py`](manager.py), [`disk.py`](disk.py), [`user.py`](user.py), and [`utils.py`](utils.py). Files under `old_files/` are retained only as development history.
+The primary implementation is in [`manager.py`](manager.py), [`disk.py`](disk.py), [`user.py`](user.py), and [`utils.py`](utils.py).
 
 ## Running the System
 
